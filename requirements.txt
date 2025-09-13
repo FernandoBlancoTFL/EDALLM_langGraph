@@ -1,0 +1,17 @@
+pandas
+openpyxl
+matplotlib
+seaborn
+
+langchain
+langchain-community
+python-dotenv
+tabulate
+
+langchain-google-genai
+langchain-ollama
+
+langchain-experimental
+
+langgraph
+
