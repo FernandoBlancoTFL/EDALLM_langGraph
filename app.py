@@ -5,6 +5,7 @@ import seaborn as sns
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.agents import initialize_agent, Tool
 from langchain_experimental.tools import PythonREPLTool  # intérprete de Python de Camel AI
+from typing import TypedDict, List, Any, Optional, Optional
 from langchain.prompts import PromptTemplate
 from langchain_ollama import ChatOllama
 from dotenv import load_dotenv
@@ -30,14 +31,13 @@ llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=api_key, t
 # ======================
 python_repl = PythonREPLTool()
 
-def run_python_with_df(code: str):
+def run_python_with_df(code: str, error_context: Optional[str] = None):
     """
     Ejecuta código Python con acceso al DataFrame `df` ya cargado.
-    No permite redefinir `df` para evitar simulaciones inventadas.
+    Incluye contexto de errores previos para mejor debugging.
     """
-    local_vars = {"df": df, "pd": pd, "plt": plt, "sns": sns}
+    local_vars = {"df": df, "pd": pd, "plt": plt, "sns": sns, "os": os}
 
-    # Bloquear intentos de volver a definir df o crear datos de ejemplo
     prohibited_patterns = [
         "pd.DataFrame",
         "df = ",
@@ -52,13 +52,42 @@ def run_python_with_df(code: str):
     code_lower = code.lower()
     for pattern in prohibited_patterns:
         if pattern.lower() in code_lower:
-            return f"❌ Error: Código bloqueado. Detectado intento de crear DataFrame o datos de ejemplo: '{pattern}'. Usa SOLO el df existente."
+            return {
+                "success": False,
+                "result": None,
+                "error": f"Código bloqueado. Detectado intento de crear DataFrame: '{pattern}'. Usa SOLO el df existente.",
+                "error_type": "prohibited_pattern"
+            }
 
     try:
-        exec(code, {}, local_vars)
-        return "✅ Código ejecutado con éxito."
+        import ast
+        parsed = ast.parse(code)
+        if parsed.body and isinstance(parsed.body[-1], ast.Expr):
+            last_expr = parsed.body.pop()
+            exec(compile(ast.Module(parsed.body, type_ignores=[]), filename="<ast>", mode="exec"), {}, local_vars)
+            result = eval(compile(ast.Expression(last_expr.value), filename="<ast>", mode="eval"), {}, local_vars)
+        else:
+            exec(code, {}, local_vars)
+            result = None
+
+        return {
+            "success": True,
+            "result": result if result is not None else "✅ Código ejecutado con éxito.",
+            "error": None,
+            "error_type": None
+        }
     except Exception as e:
-        return f"⚠️ Error ejecutando código: {e}"
+        error_type = type(e).__name__
+        return {
+            "success": False,
+            "result": None,
+            "error": str(e),
+            "error_type": error_type
+        }
+    
+def get_tools_summary(tools: List[Tool]) -> str:
+    """Devuelve un resumen con nombre y descripción de cada tool."""
+    return "\n".join([f"- {t.name}: {t.description}" for t in tools])
 
 
 # ======================
@@ -242,6 +271,57 @@ tools = [
     ),
 ]
 
+# ======================
+# Prompt unificado para Python
+# ======================
+def build_code_prompt(query: str, execution_history: List[dict] = None, df_info: dict = None):
+    """
+    Genera un prompt contextual que incluye historial de errores y información del DataFrame.
+    """
+    
+    # Información básica del DataFrame
+    if df_info is None:
+        df_info = {
+            "columns": list(df.columns),
+            "dtypes": df.dtypes.to_dict(),
+            "shape": df.shape,
+            "sample": df.head(2).to_dict()
+        }
+    
+    base_prompt = f"""
+Eres un experto en análisis de datos con Python y pandas.
+
+INFORMACIÓN DEL DATAFRAME:
+- Columnas disponibles: {df_info['columns']}
+- Tipos de datos: {', '.join([f"{col}: {dtype}" for col, dtype in df_info['dtypes'].items()])}
+- Dimensiones: {df_info['shape']}
+
+REGLAS IMPORTANTES:
+1. Usa EXCLUSIVAMENTE el DataFrame 'df' que ya está cargado
+2. NO crees nuevos DataFrames ni datos de ejemplo
+3. Para gráficos, guarda en './Outputs/' y usa plt.show()
+4. Si trabajas con columnas de tiempo, verifica su tipo primero
+5. Para columnas tipo 'time', usa df['columna'].astype(str) o métodos específicos
+
+TAREA: {query}
+"""
+
+    # Agregar historial de errores si existe
+    if execution_history:
+        base_prompt += "\n\nHISTORIAL DE INTENTOS PREVIOS:\n"
+        for i, attempt in enumerate(execution_history, 1):
+            if not attempt['success']:
+                base_prompt += f"""
+Intento {i}:
+Código: {attempt.get('code', 'N/A')}
+Error: {attempt['error']} (Tipo: {attempt['error_type']})
+"""
+        
+    base_prompt += "\n⚠️ IMPORTANTE: Analiza los errores anteriores y genera un código DIFERENTE que los evite. Solo genera un gráfico UNICAMENTE si el usuario lo pide.\n"
+    base_prompt += "\nResponde SOLO con código Python ejecutable, sin explicaciones ni markdown:"
+    
+    return base_prompt
+
 # Mapeo para invocarlos fácilmente
 tool_dict = {t.name: t for t in tools}
 
@@ -252,282 +332,295 @@ class AgentState(TypedDict):
     query: str
     action: str
     result: Any
+    thought: str
     history: List[str]
+    execution_history: List[dict]  # Nuevo: historial detallado de ejecuciones
+    iteration_count: int           # Nuevo: contador de iteraciones
+    max_iterations: int           # Nuevo: límite de iteraciones
+    df_info: dict                 # Nuevo: información cached del DataFrame
+    success: bool                 # Nuevo: flag de éxito
+    final_error: Optional[str]    # Nuevo: error final si no se pudo resolver
 
 # ======================
 # 5. Nodos del grafo
 # ======================
 def node_clasificar(state: AgentState):
-    """El LLM decide qué acción tomar: usar un tool disponible o Python_Interpreter"""
+    """El LLM decide qué acción tomar con contexto mejorado"""
+    
+    # Obtener información del DataFrame si no existe
+    if not state.get("df_info"):
+        state["df_info"] = {
+            "columns": list(df.columns),
+            "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
+            "shape": df.shape,
+            "sample": df.head(2).to_dict()
+        }
+    
+    # Contexto de iteraciones previas
+    iteration_context = ""
+    if state["iteration_count"] > 0:
+        iteration_context = f"\nEsta es la iteración #{state['iteration_count'] + 1}. Intentos previos han fallado."
+        if state["execution_history"]:
+            last_error = state["execution_history"][-1].get("error", "")
+            iteration_context += f"\nÚltimo error: {last_error}"
 
-    # Listado dinámico de tools disponibles
-    available_tools = list(tool_dict.keys())
-    tools_str = ", ".join([t for t in available_tools if t != "Python_Interpreter"])
+    tools_summary = get_tools_summary(tools)
 
     prompt = f"""
-Eres un asistente de análisis de datos. Analiza esta consulta del usuario y decide qué acción tomar.
+Eres un asistente de análisis de datos experto. Analiza esta consulta y decide la mejor acción.
 
-Pregunta del usuario: {state['query']}
+CONSULTA: {state['query']}
+DATAFRAME INFO: Columnas = {state['df_info']['columns']}, Shape = {state['df_info']['shape']}
+{iteration_context}
 
-Tools disponibles:
-{tools_str}
+HERRAMIENTAS DISPONIBLES:
+{tools_summary}
 
-Descripción de tools:
-- get_summary: resumen estadístico del dataset
-- get_columns: lista de columnas
-- get_missing_values: valores nulos
-- plot_histogram: histograma de una columna numérica
-- plot_correlation_heatmap: mapa de correlaciones
-- etc.
-
-Reglas de decisión:
-1. Si la consulta puede resolverse directamente con un tool existente, úsalo.
-2. Si necesitas mostrar datos específicos (como "primeros 5 registros", "filtrar por condición", "operaciones personalizadas"), usa "Python_Interpreter".
-3. Para consultas complejas o que requieren código personalizado, usa "Python_Interpreter".
+DECISIÓN:
+Analiza la consulta y selecciona la herramienta más adecuada. 
+Si ninguna herramienta especializada es suficiente, usa Python_Interpreter.
 
 Formato de salida:
-Thought: <tu razonamiento>
-Action: <nombre_del_tool_o_Python_Interpreter>
+Thought: <análisis detallado de la consulta y estrategia>
+Action: <nombre exacto de la herramienta elegida>
 """
 
-    # Respuesta del LLM
     response = llm.invoke(prompt).content.strip()
 
-    # Separar Thought y Action
-    thought, action = "", ""
+    # Extraer thought y action
+    thought, action = "", "Python_Interpreter"
     for line in response.splitlines():
         if line.lower().startswith("thought:"):
             thought = line.split(":", 1)[1].strip()
         elif line.lower().startswith("action:"):
             action = line.split(":", 1)[1].strip()
 
-    # Si no detectó bien, fallback a todo el texto como action
-    if not action:
-        action = response.splitlines()[-1].strip()
-
-    # Guardar en el estado
     state["thought"] = thought
     state["action"] = action
+    state["history"].append(f"Iteración {state['iteration_count']} - Clasificar → {thought[:100]}...")
 
-    # Mostrar en consola
-    print(f"\n🧠 Thought: {thought}")
-    print(f"➡️ Action elegido: {action}")
+    print(f"\n🧠 Iteración {state['iteration_count']} - Thought: {thought}")
+    print(f"➡️ Action: {action}")
 
     return state
 
-def node_tool_or_python(state: AgentState):
-    """Ejecuta el tool o el intérprete según corresponda"""
-    action = state["action"]
-    print(f"⚙️ Ejecutando acción: {action}")
+def node_ejecutar_python(state: AgentState):
+    """Ejecuta código Python con manejo robusto de errores y contexto"""
+    
+    print(f"⚙️ Ejecutando Python - Intento {state['iteration_count'] + 1}")
+    
+    # Generar código con contexto completo
+    code_prompt = build_code_prompt(
+        state["query"], 
+        state["execution_history"], 
+        state["df_info"]
+    )
+    
+    # Generar código
+    python_code = llm.invoke(code_prompt).content.strip()
+    
+    # Limpiar markdown
+    if python_code.startswith("```"):
+        python_code = python_code.strip("`")
+        if python_code.lower().startswith("python"):
+            python_code = python_code[len("python"):].strip()
+        python_code = python_code.replace("```", "").strip()
 
-    if action in tool_dict and action != "Python_Interpreter":
-        tool_func = tool_dict[action].func
-
-        # Si la función requiere argumentos (ej: plot_histogram), tratamos de extraerlos del query
-        import inspect
-        sig = inspect.signature(tool_func)
-        params = sig.parameters
-
-        if len(params) == 0:
-            # Tool sin argumentos -> se llama directo
-            result = tool_func(None)
-        else:
-            # Tool con 1 argumento -> intentamos extraer columna del query
-            query = state["query"]
-            column = None
-            for col in df.columns:
-                if col.lower() in query.lower():
-                    column = col
-                    break
-            if column:
-                result = tool_func(column)
-            else:
-                result = tool_func(query)  # fallback: pasar el query entero
-
-    elif action == "Python_Interpreter":
-        code_generation_prompt = f"""
-Convierte esta consulta en código Python ejecutable:
-
-Consulta: {state['query']}
-
-Contexto:
-- El DataFrame se llama 'df' y YA está cargado.
-- ❌ No crear nuevos DataFrames ni datos de ejemplo.
-- ✅ Usa solo df existente.
-Solo genera un gráfico si el usuario lo pide explícitamente. Si pide ver datos, responde con el método adecuado sin graficar. No verifiques con código usando if, toma tu la decisión.
-Solo si el usuario pide un gráfico ten en cuenta lo siguiente:
-- La columna temporal puede ser: datetime.time, datetime.datetime o string.
-- Antes de operar, **inspecciona el tipo de la columna temporal**.
-- Si la columna es solo hora (`datetime.time`) y existe columna 'Date', **combínalas** para crear un datetime completo:
-    `df['DateTime'] = pd.to_datetime(df['Date'].astype(str) + ' ' + df['Time'].astype(str))`
-    `df['Hour'] = df['DateTime'].dt.hour`
-- Para datetime.datetime: `df['Hour'] = df['Time'].dt.hour`
-- Para string convertida a datetime: primero `df['DateTime'] = pd.to_datetime(df['Time'])`, luego `df['Hour'] = df['DateTime'].dt.hour`
-- Si existe columna de estado de reserva:
-    - Asegúrate de convertirla a tipo categórico:  
-      `df['Booking Status'] = df['Booking Status'].astype('category')`
-    - Usar este campo como color en los gráficos.
-- Si no hay columna explícita de conteo de reservas, calcularla con `groupby + size()`.
-- **No manejar errores con try/except**: deja que cualquier error crítico llegue al nodo de validación.
-- Antes de llamar a plt.show(), **guardar el gráfico** en la carpeta ./Outputs con un nombre representativo (tu dale un nombre representativo al archivo):
-    `plt.savefig(f"./Outputs/name_this_graph.png", dpi=300, bbox_inches="tight")`
-- Recuerda ejecutar a plt.show() una vez guardado el gráfico en la carpeta.
-
-Instrucciones (en el caso de que el usuario pida realizar un gráfico UNICAMENTE):
-1. Detectar y convertir correctamente la columna temporal, fusionando fecha y hora si aplica.
-2. Convertir la columna de estado de reserva en categoría si existe.
-3. Calcular la cantidad de reservas por hora (y por estado de reserva si existe).
-4. Generar un gráfico de dispersión: x = hora, y = cantidad de reservas, color = estado de reserva (si aplica).
-5. Código **robusto y ejecutable** para cualquier dataset similar, pero **sin atraparlo en try/except**.
-
-Responde SOLO con código Python ejecutable, sin explicaciones.
-"""
-        try:
-            python_code = llm.invoke(code_generation_prompt).content.strip()
-
-            # --- Limpiar formato de markdown ---
-            if python_code.startswith("```"):
-                python_code = python_code.strip("`")  # elimina los backticks
-                if python_code.lower().startswith("python"):
-                    python_code = python_code[len("python"):].strip()
-                # También elimina un posible bloque de cierre al final
-                if python_code.endswith("```"):
-                    python_code = python_code[:-3].strip()
-
-            print("🔍 Código generado por el LLM:\n", python_code)
-            result = run_python_with_df(python_code)
-            print(f"{result}")
-        except Exception as e:
-            result = f"Error al generar o ejecutar código: {str(e)}"
+    print(f"\n🔍 Código generado:\n{python_code}")
+    
+    # Ejecutar código
+    execution_result = run_python_with_df(python_code)
+    
+    # Crear registro de ejecución
+    execution_record = {
+        "iteration": state["iteration_count"],
+        "code": python_code,
+        "success": execution_result["success"],
+        "result": execution_result["result"],
+        "error": execution_result["error"],
+        "error_type": execution_result["error_type"]
+    }
+    
+    # Actualizar historial
+    state["execution_history"].append(execution_record)
+    state["result"] = execution_result["result"]
+    state["success"] = execution_result["success"]
+    
+    if execution_result["success"]:
+        print(f"✅ Éxito: {execution_result['result']}")
     else:
-        result = f"Acción '{action}' no reconocida."
-
-    state["result"] = result
+        print(f"❌ Error: {execution_result['error']}")
+        state["final_error"] = execution_result["error"]
+    
+    state["history"].append(f"Ejecutar Python → {'Éxito' if execution_result['success'] else 'Error: ' + str(execution_result['error'])}")
+    
     return state
 
-def node_validar_resultado(state: AgentState):
-    """
-    Valida si el resultado necesita reintento.
-    Maneja errores de conversión, tipos de datos y problemas comunes.
-    """
-    result = state["result"]
-
-    # Lista expandida de errores que requieren reintento
-    error_patterns = [
-        "no es numérica",
-        "typeerror",
-        "valueerror",
-        "convertible to datetime",
-        "cannot convert",
-        "invalid literal",
-        "keyerror",
-        "attributeerror",
-        "unsupported operand",
-        "no numeric data to plot"
-    ]
-
-    needs_retry = any(pattern in str(result).lower() for pattern in error_patterns)
-
-    if isinstance(result, str) and needs_retry:
-        print("⚠️ Validación: error detectado, reintentando con estrategia mejorada...")
-
-        retry_prompt = f"""
-Convierte esta consulta en código Python ejecutable:
-
-Consulta: {state['query']}
-
-Contexto:
-- El DataFrame se llama 'df' y YA está cargado.
-- ❌ No crear nuevos DataFrames ni datos de ejemplo.
-- ✅ Usa solo df existente.
-Solo genera un gráfico si el usuario lo pide explícitamente. Si pide ver datos, responde con el método adecuado sin graficar. No verifiques con código usando if, toma tu la decisión.
-Solo si el usuario pide un gráfico ten en cuenta lo siguiente:
-- La columna temporal puede ser: datetime.time, datetime.datetime o string.
-- Antes de operar, **inspecciona el tipo de la columna temporal**.
-- Si la columna es solo hora (`datetime.time`) y existe columna 'Date', **combínalas** para crear un datetime completo:
-    `df['DateTime'] = pd.to_datetime(df['Date'].astype(str) + ' ' + df['Time'].astype(str))`
-    `df['Hour'] = df['DateTime'].dt.hour`
-- Para datetime.datetime: `df['Hour'] = df['Time'].dt.hour`
-- Para string convertida a datetime: primero `df['DateTime'] = pd.to_datetime(df['Time'])`, luego `df['Hour'] = df['DateTime'].dt.hour`
-- Si existe columna de estado de reserva:
-    - Asegúrate de convertirla a tipo categórico:  
-      `df['Booking Status'] = df['Booking Status'].astype('category')`
-    - Usar este campo como color en los gráficos.
-- Si no hay columna explícita de conteo de reservas, calcularla con `groupby + size()`.
-- **No manejar errores con try/except**: deja que cualquier error crítico llegue al nodo de validación.
-- Antes de llamar a plt.show(), **guardar el gráfico** en la carpeta ./Outputs con un nombre representativo (tu dale un nombre representativo al archivo):
-    `plt.savefig(f"./Outputs/name_this_graph.png", dpi=300, bbox_inches="tight")`
-- Recuerda ejecutar a plt.show() una vez guardado el gráfico en la carpeta.
-
-Instrucciones (en el caso de que el usuario pida realizar un gráfico UNICAMENTE):
-1. Detectar y convertir correctamente la columna temporal, fusionando fecha y hora si aplica.
-2. Convertir la columna de estado de reserva en categoría si existe.
-3. Calcular la cantidad de reservas por hora (y por estado de reserva si existe).
-4. Generar un gráfico de dispersión: x = hora, y = cantidad de reservas, color = estado de reserva (si aplica).
-5. Código **robusto y ejecutable** para cualquier dataset similar, pero **sin atraparlo en try/except**.
-
-Responde SOLO con código Python ejecutable, sin explicaciones.
-"""
-        try:
-            python_code = llm.invoke(retry_prompt).content.strip()
-
-            # --- Limpiar formato de markdown ---
-            if python_code.startswith("```"):
-                python_code = python_code.strip("`")
-                if python_code.lower().startswith("python"):
-                    python_code = python_code[len("python"):].strip()
-                if python_code.endswith("```"):
-                    python_code = python_code[:-3].strip()
-
-            print("🔍 Código corregido:\n", python_code)
-            result = run_python_with_df(python_code)
-            state["result"] = result
-        except Exception as e:
-            state["result"] = f"Error al reintentar con estrategia mejorada: {str(e)}"
-
+def node_validar_y_decidir(state: AgentState):
+    """Valida el resultado y decide si continuar iterando"""
+    
+    state["iteration_count"] += 1
+    success = state.get("success", False)
+    max_iterations = state.get("max_iterations", 3)
+    
+    print(f"\n🔍 Validación - Iteración {state['iteration_count']}")
+    print(f"   Éxito: {success}")
+    print(f"   Iteraciones restantes: {max_iterations - state['iteration_count']}")
+    
+    # Decidir próxima acción
+    if success:
+        state["next_node"] = "responder"
+        print("   ➡️ Decisión: Proceder a responder (éxito)")
+    elif state["iteration_count"] >= max_iterations:
+        state["next_node"] = "responder"
+        print("   ➡️ Decisión: Proceder a responder (máximo de iteraciones alcanzado)")
+    else:
+        state["next_node"] = "clasificar"
+        print("   ➡️ Decisión: Nueva iteración")
+    
+    state["history"].append(f"Validar → Iteración {state['iteration_count']}, Éxito: {success}, Próximo: {state['next_node']}")
+    
     return state
 
 def node_responder(state: AgentState):
-    """Genera la respuesta final para el usuario"""
-    prompt = f"""
-Eres un asistente en español.
+    """Genera la respuesta final basada en todo el contexto"""
+    
+    success = state.get("success", False)
+    
+    if success:
+        prompt = f"""
 Pregunta del usuario: {state['query']}
-Resultado técnico: {state['result']}
+Resultado obtenido: {state['result']}
+Número de iteraciones necesarias: {state['iteration_count']}
 
-Redacta una respuesta clara, en español, explicando el resultado.
+Genera una respuesta clara y amigable en español explicando qué se logró.
 """
+    else:
+        # Analizar todos los errores para dar una respuesta informativa
+        errors_summary = []
+        for record in state["execution_history"]:
+            if not record["success"]:
+                errors_summary.append(f"- {record['error_type']}: {record['error']}")
+        
+        prompt = f"""
+Pregunta del usuario: {state['query']}
+Después de {state['iteration_count']} iteraciones, no se pudo completar la tarea.
+
+Errores encontrados:
+{chr(10).join(errors_summary)}
+
+Genera una respuesta empática en español explicando:
+1. Que se intentó resolver la consulta múltiples veces
+2. Los principales problemas encontrados (en términos simples)
+3. Sugerencias para el usuario (ej: verificar formato de datos, columnas, etc.)
+"""
+
     respuesta = llm.invoke(prompt).content
-    print("\n🤖 Respuesta:", respuesta)
-    state["history"].append(respuesta)
+    print(f"\n🤖 Respuesta Final:\n{respuesta}")
+    
+    # Log final
+    state["history"].append(f"Responder → Finalizado con {'éxito' if success else 'error'}")
+    
     return state
+
+
+def route_after_validation(state: AgentState):
+    """Determina la siguiente ruta basada en la validación"""
+    success = state.get("success", False)
+    iteration_count = state.get("iteration_count", 0)
+    max_iterations = state.get("max_iterations", 3)
+    
+    print(f"\n🔧 DEBUG route_after_validation:")
+    print(f"   Success: {success}")
+    print(f"   Iteration: {iteration_count}")
+    print(f"   Max iterations: {max_iterations}")
+    print(f"   Next node from state: {state.get('next_node', 'N/A')}")
+    
+    if success:
+        print("   → Routing to: responder (success)")
+        return "responder"
+    elif iteration_count >= max_iterations:
+        print("   → Routing to: responder (max iterations reached)")
+        return "responder"
+    else:
+        print("   → Routing to: clasificar (continue iteration)")
+        return "clasificar"
 
 # ======================
 # 6. Construir el grafo
 # ======================
-graph = StateGraph(AgentState)
+def create_graph():
+    graph = StateGraph(AgentState)
 
-graph.add_node("clasificar", node_clasificar)
-graph.add_node("ejecutar", node_tool_or_python)
-graph.add_node("validar", node_validar_resultado)
-graph.add_node("responder", node_responder)
+    # Nodos
+    graph.add_node("clasificar", node_clasificar)
+    graph.add_node("ejecutar_python", node_ejecutar_python)
+    graph.add_node("validar", node_validar_y_decidir)
+    graph.add_node("responder", node_responder)
 
-graph.set_entry_point("clasificar")
-graph.add_edge("clasificar", "ejecutar")
-graph.add_edge("ejecutar", "validar")
-graph.add_edge("validar", "responder")
-graph.add_edge("responder", END)
+    # Punto de entrada
+    graph.set_entry_point("clasificar")
 
-app = graph.compile()
+    # Flujo principal
+    graph.add_edge("clasificar", "ejecutar_python")
+    graph.add_edge("ejecutar_python", "validar")
+    
+    # Enrutamiento condicional desde validación
+    graph.add_conditional_edges("validar", route_after_validation)
+    
+    # Fin del grafo
+    graph.add_edge("responder", END)
 
-# ======================
-# 7. Loop de consola
-# ======================
-while True:
-    query = input("Pregunta sobre el dataset (o 'salir'): ")
-    if query.lower() == "salir":
-        break
-    state = {"query": query, "action": "", "result": None, "history": []}
-    app.invoke(state)
+    return graph.compile()
 
+def main():
+    app = create_graph()
+    
+    print("🚀 Sistema de Análisis de Datos con Iteración Inteligente")
+    print("   Basado en LangGraph con propagación de errores")
+    print("   Escribe 'salir' para terminar\n")
+    
+    while True:
+        query = input("Pregunta sobre el dataset (o 'salir'): ")
+        if query.lower() == "salir":
+            break
 
+        # Estado inicial con configuración completa
+        initial_state = {
+            "query": query,
+            "action": "",
+            "result": None,
+            "thought": "",
+            "history": [],
+            "execution_history": [],      # Historial detallado de ejecuciones
+            "iteration_count": 0,         # Contador de iteraciones
+            "max_iterations": 3,          # Máximo de iteraciones
+            "df_info": {},                # Info del DataFrame (se llena automáticamente)
+            "success": False,             # Flag de éxito
+            "final_error": None,          # Error final si aplica
+            "next_node": "clasificar"     # Control de flujo
+        }
+
+        print(f"\n{'='*60}")
+        print(f"🔄 Procesando consulta: {query}")
+        print(f"{'='*60}")
+        
+        try:
+            final_state = app.invoke(initial_state)
+            
+            # Resumen final para debugging
+            print(f"\n📊 RESUMEN DE EJECUCIÓN:")
+            print(f"   Iteraciones totales: {final_state['iteration_count']}")
+            print(f"   Éxito: {final_state.get('success', False)}")
+            if not final_state.get('success', False):
+                print(f"   Error final: {final_state.get('final_error', 'N/A')}")
+            print(f"   Historial: {len(final_state['history'])} eventos")
+            
+        except Exception as e:
+            print(f"❌ Error crítico en el sistema: {e}")
+            
+        print(f"\n{'-'*60}\n")
+
+if __name__ == "__main__":
+    main()
 
