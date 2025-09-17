@@ -11,13 +11,141 @@ from langchain_ollama import ChatOllama
 from dotenv import load_dotenv
 from langgraph.graph import StateGraph, END
 from typing import TypedDict, List, Any
+import sys
+
+import psycopg
+from psycopg import sql
+from langgraph.checkpoint.postgres import PostgresSaver
+import uuid
+
+# Suprimir warnings de Google Cloud
+import warnings
+warnings.filterwarnings('ignore', message='.*ALTS.*')
+os.environ['GRPC_VERBOSITY'] = 'ERROR'
+os.environ['GRPC_TRACE'] = ''
+
+# ======================
+# 0. Configuración y creación de BD PostgreSQL
+# ======================
+
+def load_db_config():
+    """Carga la configuración de la base de datos desde variables de entorno"""
+    load_dotenv()
+    
+    db_config = {
+        'host': os.getenv('POSTGRES_HOST', 'localhost'),
+        'port': os.getenv('POSTGRES_PORT', '5432'),
+        'user': os.getenv('POSTGRES_USER', 'postgres'),
+        'password': os.getenv('POSTGRES_PASSWORD'),
+        'database': os.getenv('POSTGRES_DB', 'langgraph_analysis')
+    }
+    
+    # Verificar que las credenciales estén configuradas
+    if not db_config['password']:
+        print("❌ Error: POSTGRES_PASSWORD no está configurada en el archivo .env")
+        sys.exit(1)
+    
+    return db_config
+
+def database_exists(cursor, db_name):
+    """Verifica si una base de datos existe"""
+    cursor.execute(
+        "SELECT 1 FROM pg_database WHERE datname = %s", 
+        (db_name,)
+    )
+    return cursor.fetchone() is not None
+
+def create_database_if_not_exists():
+    """
+    Crea la base de datos si no existe.
+    Retorna True si la BD se creó o ya existía, False en caso de error.
+    """
+    db_config = load_db_config()
+    target_db = db_config['database']
+    
+    print(f"🔍 Verificando existencia de base de datos: {target_db}")
+    
+    # Conectar a PostgreSQL usando la BD por defecto 'postgres'
+    try:
+        with psycopg.connect(
+            host=db_config['host'],
+            port=db_config['port'],
+            user=db_config['user'],
+            password=db_config['password'],
+            dbname='postgres',  # Conectar a la BD por defecto
+            autocommit=True
+        ) as conn:
+            with conn.cursor() as cursor:
+                # Verificar si la base de datos existe
+                if database_exists(cursor, target_db):
+                    print(f"✅ Base de datos '{target_db}' ya existe")
+                    return True
+                else:
+                    print(f"📝 Base de datos '{target_db}' no existe. Creando...")
+                    
+                    # Crear la base de datos
+                    cursor.execute(sql.SQL("CREATE DATABASE {}").format(
+                        sql.Identifier(target_db)
+                    ))
+                    
+                    print(f"✅ Base de datos '{target_db}' creada exitosamente")
+                    return True
+            
+    except psycopg.Error as e:
+        print(f"❌ Error al gestionar la base de datos PostgreSQL:")
+        print(f"   Código de error: {e.pgcode}")
+        print(f"   Mensaje: {e.pgerror}")
+        
+        # Errores comunes y sugerencias
+        if "authentication failed" in str(e).lower():
+            print("   💡 Sugerencia: Verifica las credenciales en el archivo .env")
+        elif "connection refused" in str(e).lower():
+            print("   💡 Sugerencia: Verifica que PostgreSQL esté ejecutándose")
+        elif "permission denied" in str(e).lower():
+            print("   💡 Sugerencia: El usuario necesita permisos CREATEDB")
+        
+        return False
+    except Exception as e:
+        print(f"❌ Error inesperado: {e}")
+        return False
+
+def test_target_database_connection():
+    """Prueba la conexión a la base de datos objetivo"""
+    db_config = load_db_config()
+    
+    try:
+        with psycopg.connect(
+            host=db_config['host'],
+            port=db_config['port'],
+            user=db_config['user'],
+            password=db_config['password'],
+            dbname=db_config['database']
+        ) as conn:
+            pass  # Conexión exitosa
+        print(f"✅ Conexión exitosa a la base de datos '{db_config['database']}'")
+        return True
+    except psycopg.Error as e:
+        print(f"❌ Error al conectar a la base de datos objetivo: {e}")
+        return False
 
 # ======================
 # 1. Configuración inicial
 # ======================
 load_dotenv() # Cargar variables de entorno (.env debe contener GOOGLE_API_KEY)
+
+# Crear BD antes de continuar
+print("🚀 Inicializando sistema de análisis de datos...")
+if not create_database_if_not_exists():
+    print("❌ No se pudo crear o acceder a la base de datos. Terminando aplicación.")
+    sys.exit(1)
+
+# Probar conexión a la BD objetivo
+if not test_target_database_connection():
+    print("❌ No se pudo conectar a la base de datos objetivo. Terminando aplicación.")
+    sys.exit(1)
+
 api_key = os.getenv("GOOGLE_API_KEY")
-os.makedirs("./Outputs", exist_ok=True) # Crear carpeta para guardar gráficos si no existe
+os.makedirs("./outputs", exist_ok=True) # Crear carpeta para guardar gráficos si no existe
 
 # Cargar dataset con pandas
 df = pd.read_excel("./Data/ncr_ride_bookings.xlsx")
@@ -25,6 +153,34 @@ df = pd.read_excel("./Data/ncr_ride_bookings.xlsx")
 # Inicializar LLM
 llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=api_key, temperature=0)
 # llm = ChatOllama(model="gemma3", temperature=0)
+
+# ======================
+# 1,5. Configurar PostgresSaver para guardar checkpoints
+# ======================
+
+def get_postgres_connection_string():
+    """Genera la cadena de conexión para PostgreSQL usando psycopg3"""
+    db_config = load_db_config()
+    return f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+
+# Configurar PostgresSaver correctamente
+connection_string = get_postgres_connection_string()
+
+try:
+    # Método 1: Crear conexión directa usando psycopg
+    import psycopg
+    conn = psycopg.connect(connection_string)
+    
+    # Crear PostgresSaver con la conexión directa
+    checkpoint_saver = PostgresSaver(conn)
+    checkpoint_saver.setup()
+    
+    print("✅ PostgresSaver configurado exitosamente")
+    
+except Exception as e:
+    print(f"❌ Error configurando PostgresSaver: {e}")
+    print("⚠️ Continuando sin checkpoints...")
+    checkpoint_saver = None
 
 # ======================
 # 2. Definir intérprete Python con acceso a df
@@ -170,7 +326,7 @@ def plot_histogram(column: str):
     plt.ylabel("Frecuencia", fontsize=12)
     plt.grid(axis="y", alpha=0.5)
 
-    file_path = f"./Outputs/histogram_{column}.png"
+    file_path = f"./outputs/histogram_{column}.png"
     plt.savefig(file_path, dpi=300, bbox_inches="tight")
     plt.show()
     return f"✅ Histograma generado y guardado en {file_path}"
@@ -186,7 +342,7 @@ def plot_correlation_heatmap(_):
     sns.heatmap(numeric_cols.corr(), annot=True, cmap="coolwarm", fmt=".2f")
     plt.title("Mapa de calor de correlaciones", fontsize=16)
 
-    file_path = "./Outputs/correlation_heatmap.png"
+    file_path = "./outputs/correlation_heatmap.png"
     plt.savefig(file_path, dpi=300, bbox_inches="tight")
     plt.show()
     return f"✅ Heatmap de correlaciones generado y guardado en {file_path}"
@@ -205,7 +361,7 @@ def plot_time_series(_):
     plt.ylabel("Cantidad de viajes", fontsize=12)
     plt.grid(True, alpha=0.5)
 
-    file_path = "./Outputs/time_series.png"
+    file_path = "./outputs/time_series.png"
     plt.savefig(file_path, dpi=300, bbox_inches="tight")
     plt.show()
     return f"✅ Serie temporal generada y guardada en {file_path}"
@@ -225,7 +381,7 @@ def plot_payment_method_distribution(_):
     plt.xticks(rotation=45, ha="right")
     plt.grid(axis="y", alpha=0.5)
 
-    file_path = "./Outputs/payment_method_distribution.png"
+    file_path = "./outputs/payment_method_distribution.png"
     plt.savefig(file_path, dpi=300, bbox_inches="tight")
     plt.show()
     return f"✅ Gráfico de métodos de pago generado y guardado en {file_path}"
@@ -244,7 +400,7 @@ def plot_booking_value_by_vehicle_type(_):
     plt.xticks(rotation=30, ha="right")
     plt.grid(axis="y", alpha=0.5)
 
-    file_path = "./Outputs/booking_value_by_vehicle_type.png"
+    file_path = "./outputs/booking_value_by_vehicle_type.png"
     plt.savefig(file_path, dpi=300, bbox_inches="tight")
     plt.show()
     return f"✅ Boxplot generado y guardado en {file_path}"
@@ -298,10 +454,9 @@ INFORMACIÓN DEL DATAFRAME:
 
 REGLAS IMPORTANTES:
 1. Usa EXCLUSIVAMENTE el DataFrame 'df' que ya está cargado
-2. NO crees nuevos DataFrames ni datos de ejemplo
-3. Para gráficos, guarda en './Outputs/' y usa plt.show()
+2. NO crees ni simules nuevos DataFrames ni datos de ejemplo
+3. Para gráficos, guarda en './outputs/' y usa plt.show()
 4. Si trabajas con columnas de tiempo, verifica su tipo primero
-5. Para columnas tipo 'time', usa df['columna'].astype(str) o métodos específicos
 
 TAREA: {query}
 """
@@ -340,6 +495,7 @@ class AgentState(TypedDict):
     df_info: dict                 # Nuevo: información cached del DataFrame
     success: bool                 # Nuevo: flag de éxito
     final_error: Optional[str]    # Nuevo: error final si no se pudo resolver
+    thread_id: str  # NUEVO: ID único para identificar la conversación
 
 # ======================
 # 5. Nodos del grafo
@@ -483,7 +639,7 @@ def node_validar_y_decidir(state: AgentState):
     return state
 
 def node_responder(state: AgentState):
-    """Genera la respuesta final basada en todo el contexto"""
+    """Genera la respuesta final basada en todo el contexto y guarda el checkpoint"""
     
     success = state.get("success", False)
     
@@ -496,7 +652,6 @@ Número de iteraciones necesarias: {state['iteration_count']}
 Genera una respuesta clara y amigable en español explicando qué se logró.
 """
     else:
-        # Analizar todos los errores para dar una respuesta informativa
         errors_summary = []
         for record in state["execution_history"]:
             if not record["success"]:
@@ -522,7 +677,6 @@ Genera una respuesta empática en español explicando:
     state["history"].append(f"Responder → Finalizado con {'éxito' if success else 'error'}")
     
     return state
-
 
 def route_after_validation(state: AgentState):
     """Determina la siguiente ruta basada en la validación"""
@@ -571,55 +725,97 @@ def create_graph():
     # Fin del grafo
     graph.add_edge("responder", END)
 
-    return graph.compile()
+    # Compilar con o sin checkpointer según esté disponible
+    if checkpoint_saver is not None:
+        return graph.compile(checkpointer=checkpoint_saver)
+    else:
+        print("⚠️ Compilando grafo sin checkpoints")
+        return graph.compile()
 
 def main():
     app = create_graph()
     
+    print("✅ Base de datos PostgreSQL configurada correctamente")
+    print("✅ Sistema de checkpoints activado")
     print("🚀 Sistema de Análisis de Datos con Iteración Inteligente")
     print("   Basado en LangGraph con propagación de errores")
     print("   Escribe 'salir' para terminar\n")
+    
+    # Generar un thread_id único para esta sesión
+    import uuid
+    session_id = str(uuid.uuid4())
+    print(f"🔗 Session ID: {session_id}")
     
     while True:
         query = input("Pregunta sobre el dataset (o 'salir'): ")
         if query.lower() == "salir":
             break
 
-        # Estado inicial con configuración completa
+        # Estado inicial con thread_id
         initial_state = {
             "query": query,
             "action": "",
             "result": None,
             "thought": "",
             "history": [],
-            "execution_history": [],      # Historial detallado de ejecuciones
-            "iteration_count": 0,         # Contador de iteraciones
-            "max_iterations": 3,          # Máximo de iteraciones
-            "df_info": {},                # Info del DataFrame (se llena automáticamente)
-            "success": False,             # Flag de éxito
-            "final_error": None,          # Error final si aplica
-            "next_node": "clasificar"     # Control de flujo
+            "execution_history": [],
+            "iteration_count": 0,
+            "max_iterations": 3,
+            "df_info": {},
+            "success": False,
+            "final_error": None,
+            "next_node": "clasificar",
+            "thread_id": session_id  # ID único para los checkpoints
         }
+
+        # Configuración para el checkpointer
+        config = {"configurable": {"thread_id": session_id}}
 
         print(f"\n{'='*60}")
         print(f"🔄 Procesando consulta: {query}")
         print(f"{'='*60}")
         
         try:
-            final_state = app.invoke(initial_state)
+            final_state = app.invoke(initial_state, config=config)
             
-            # Resumen final para debugging
             print(f"\n📊 RESUMEN DE EJECUCIÓN:")
             print(f"   Iteraciones totales: {final_state['iteration_count']}")
             print(f"   Éxito: {final_state.get('success', False)}")
             if not final_state.get('success', False):
                 print(f"   Error final: {final_state.get('final_error', 'N/A')}")
             print(f"   Historial: {len(final_state['history'])} eventos")
+            print(f"💾 Checkpoint guardado automáticamente en PostgreSQL")
             
         except Exception as e:
             print(f"❌ Error crítico en el sistema: {e}")
             
         print(f"\n{'-'*60}\n")
+
+
+def list_saved_checkpoints():
+    """Función para listar los checkpoints guardados en la BD"""
+    try:
+        # Conectar a la BD y consultar las tablas de checkpoint
+        db_config = load_db_config()
+        with psycopg.connect(
+            host=db_config['host'],
+            port=db_config['port'],
+            user=db_config['user'],
+            password=db_config['password'],
+            dbname=db_config['database']
+        ) as conn:
+            with conn.cursor() as cursor:
+                # Consultar checkpoints
+                cursor.execute("SELECT thread_id, checkpoint_id, created_at FROM checkpoints ORDER BY created_at DESC LIMIT 10;")
+                results = cursor.fetchall()
+                
+                print("📋 Últimos 10 checkpoints guardados:")
+                for row in results:
+                    print(f"   Thread: {row[0][:8]}... | Checkpoint: {row[1][:8]}... | Fecha: {row[2]}")
+        
+    except Exception as e:
+        print(f"❌ Error consultando checkpoints: {e}")
+
 
 if __name__ == "__main__":
     main()
