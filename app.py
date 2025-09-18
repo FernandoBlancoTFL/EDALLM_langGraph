@@ -122,6 +122,13 @@ os.environ['GRPC_TRACE'] = ''
 # ======================
 PERSISTENT_THREAD_ID = "persistent_chat_session"
 
+# Configuración del archivo Excel y tabla PostgreSQL
+DATASET_CONFIG = {
+    "excel_path": "./Data/ncr_ride_bookings.xlsx",
+    "table_name": "dataset_rides",
+    "table_schema": "public"
+}
+
 # ======================
 # 0. Configuración y creación de BD PostgreSQL
 # ======================
@@ -476,11 +483,307 @@ def verify_checkpoint_saved(config):
     except Exception as e:
         print(f"⚠️ Error verificando checkpoint: {e}")
         return False
+    
+# ======================
+# FUNCIONES PARA GESTIÓN DEL DATASET EN BD - Agregar después de las funciones de historial
+# ======================
+
+def get_postgres_data_types():
+    """
+    Mapeo de tipos de pandas a tipos PostgreSQL optimizados.
+    """
+    return {
+        'int64': 'BIGINT',
+        'int32': 'INTEGER',
+        'int16': 'SMALLINT',
+        'int8': 'SMALLINT',
+        'float64': 'DOUBLE PRECISION',
+        'float32': 'REAL',
+        'object': 'TEXT',
+        'bool': 'BOOLEAN',
+        'datetime64[ns]': 'TIMESTAMP',
+        'timedelta64[ns]': 'INTERVAL',
+        'category': 'TEXT'
+    }
+
+def sanitize_column_name(column_name: str) -> str:
+    """
+    Limpia nombres de columnas para PostgreSQL.
+    Convierte a minúsculas, reemplaza espacios y caracteres especiales.
+    """
+    import re
+    # Convertir a minúsculas
+    clean_name = column_name.lower()
+    # Reemplazar espacios y caracteres especiales con guiones bajos
+    clean_name = re.sub(r'[^a-z0-9_]', '_', clean_name)
+    # Eliminar guiones bajos consecutivos
+    clean_name = re.sub(r'_+', '_', clean_name)
+    # Eliminar guiones bajos al inicio y final
+    clean_name = clean_name.strip('_')
+    # Asegurar que no empiece con número
+    if clean_name and clean_name[0].isdigit():
+        clean_name = f'col_{clean_name}'
+    
+    return clean_name or 'unnamed_column'
+
+def check_dataset_table_exists(connection=None):
+    """
+    Verifica si la tabla del dataset existe en PostgreSQL.
+    Acepta una conexión opcional o usa checkpoint_saver si está disponible.
+    """
+    conn = connection or (checkpoint_saver.conn if checkpoint_saver else None)
+    
+    if conn is None:
+        print("⚠️ No se puede verificar tabla: no hay conexión disponible")
+        return False
+    
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = %s 
+                    AND table_name = %s
+                )
+            """, (DATASET_CONFIG["table_schema"], DATASET_CONFIG["table_name"]))
+            
+            exists = cursor.fetchone()[0]
+            print(f"🔍 Tabla '{DATASET_CONFIG['table_name']}' {'existe' if exists else 'no existe'} en BD")
+            return exists
+            
+    except Exception as e:
+        print(f"⚠️ Error verificando tabla del dataset: {e}")
+        return False
+
+def get_dataset_table_info(connection=None):
+    """
+    Obtiene información de la tabla del dataset.
+    Acepta una conexión opcional o usa checkpoint_saver si está disponible.
+    """
+    conn = connection or (checkpoint_saver.conn if checkpoint_saver else None)
+    
+    if conn is None:
+        return None
+    
+    try:
+        with conn.cursor() as cursor:
+            # Obtener información de columnas
+            cursor.execute("""
+                SELECT column_name, data_type, is_nullable
+                FROM information_schema.columns
+                WHERE table_schema = %s AND table_name = %s
+                ORDER BY ordinal_position
+            """, (DATASET_CONFIG["table_schema"], DATASET_CONFIG["table_name"]))
+            
+            columns_info = cursor.fetchall()
+            
+            # Obtener conteo de filas
+            cursor.execute(f"""
+                SELECT COUNT(*) FROM {DATASET_CONFIG["table_schema"]}.{DATASET_CONFIG["table_name"]}
+            """)
+            
+            row_count = cursor.fetchone()[0]
+            
+            # Formatear información
+            columns = [col[0] for col in columns_info]
+            dtypes = {col[0]: col[1] for col in columns_info}
+            
+            return {
+                "columns": columns,
+                "dtypes": dtypes,
+                "row_count": row_count,
+                "table_name": DATASET_CONFIG["table_name"]
+            }
+            
+    except Exception as e:
+        print(f"⚠️ Error obteniendo información de tabla: {e}")
+        return None
+
+def create_dataset_table_from_df(df: pd.DataFrame, connection=None):
+    """
+    Crea la tabla del dataset en PostgreSQL.
+    Acepta una conexión opcional o usa checkpoint_saver si está disponible.
+    """
+    conn = connection or (checkpoint_saver.conn if checkpoint_saver else None)
+    
+    if conn is None:
+        print("⚠️ No se puede crear tabla: no hay conexión disponible")
+        return False, {}
+    
+    try:
+        postgres_types = get_postgres_data_types()
+        
+        # Limpiar nombres de columnas y crear mapeo
+        original_columns = list(df.columns)
+        clean_columns = [sanitize_column_name(col) for col in original_columns]
+        column_mapping = dict(zip(original_columns, clean_columns))
+        
+        print(f"📝 Creando tabla '{DATASET_CONFIG['table_name']}' con {len(df.columns)} columnas...")
+        
+        with conn.cursor() as cursor:
+            # Construir DDL para crear tabla
+            column_definitions = []
+            
+            for original_col, clean_col in column_mapping.items():
+                # Obtener tipo de pandas
+                pandas_type = str(df[original_col].dtype)
+                
+                # Mapear a tipo PostgreSQL
+                postgres_type = postgres_types.get(pandas_type, 'TEXT')
+                
+                # Manejar casos especiales
+                if pandas_type == 'object':
+                    # Para object, verificar si es fecha o texto
+                    try:
+                        pd.to_datetime(df[original_col], errors='raise')
+                        postgres_type = 'TIMESTAMP'
+                    except:
+                        # Estimar longitud máxima para TEXT
+                        max_length = df[original_col].astype(str).str.len().max()
+                        if max_length and max_length < 255:
+                            postgres_type = f'VARCHAR({max_length + 50})'
+                        else:
+                            postgres_type = 'TEXT'
+                
+                column_definitions.append(f'"{clean_col}" {postgres_type}')
+                print(f"   {original_col} -> {clean_col} ({pandas_type} -> {postgres_type})")
+            
+            # Crear tabla
+            create_table_sql = f"""
+                CREATE TABLE {DATASET_CONFIG["table_schema"]}.{DATASET_CONFIG["table_name"]} (
+                    id SERIAL PRIMARY KEY,
+                    {', '.join(column_definitions)},
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """
+            
+            cursor.execute(create_table_sql)
+            conn.commit()
+            
+            print(f"✅ Tabla '{DATASET_CONFIG['table_name']}' creada exitosamente")
+            return True, column_mapping
+            
+    except Exception as e:
+        print(f"❌ Error creando tabla del dataset: {e}")
+        if conn:
+            conn.rollback()
+        return False, {}
+
+def insert_dataframe_to_table(df: pd.DataFrame, column_mapping: dict, connection=None):
+    """
+    Inserta los datos del DataFrame en la tabla PostgreSQL.
+    Acepta una conexión opcional o usa checkpoint_saver si está disponible.
+    """
+    conn = connection or (checkpoint_saver.conn if checkpoint_saver else None)
+    
+    if conn is None:
+        print("⚠️ No se puede insertar datos: no hay conexión disponible")
+        return False
+    
+    try:
+        # Renombrar columnas según el mapeo
+        df_clean = df.rename(columns=column_mapping)
+        
+        print(f"📥 Insertando {len(df_clean)} filas en la tabla...")
+        
+        # Preparar datos para inserción
+        columns_list = list(column_mapping.values())
+        placeholders = ', '.join(['%s'] * len(columns_list))
+        columns_str = ', '.join([f'"{col}"' for col in columns_list])
+        
+        insert_sql = f"""
+            INSERT INTO {DATASET_CONFIG["table_schema"]}.{DATASET_CONFIG["table_name"]} 
+            ({columns_str}) VALUES ({placeholders})
+        """
+        
+        # Convertir DataFrame a lista de tuplas
+        data_rows = []
+        for _, row in df_clean.iterrows():
+            row_data = []
+            for col in columns_list:
+                value = row[col]
+                if pd.isna(value):
+                    row_data.append(None)
+                elif isinstance(value, (pd.Timestamp, pd.Timedelta)):
+                    row_data.append(value.to_pydatetime() if hasattr(value, 'to_pydatetime') else str(value))
+                else:
+                    row_data.append(value)
+            data_rows.append(tuple(row_data))
+        
+        # Inserción por lotes
+        with conn.cursor() as cursor:
+            cursor.executemany(insert_sql, data_rows)
+            conn.commit()
+            
+            # Verificar inserción
+            cursor.execute(f"SELECT COUNT(*) FROM {DATASET_CONFIG['table_schema']}.{DATASET_CONFIG['table_name']}")
+            inserted_count = cursor.fetchone()[0] - 1  # Restar 1 por el ID serial
+            
+            print(f"✅ {inserted_count} filas insertadas correctamente")
+            return True
+            
+    except Exception as e:
+        print(f"❌ Error insertando datos: {e}")
+        if conn:
+            conn.rollback()
+        return False
+
+def load_excel_to_postgres(connection=None):
+    """
+    Función principal que carga el archivo Excel a PostgreSQL si no existe.
+    Acepta una conexión opcional para resolver el problema de dependencias.
+    """
+    # Verificar si ya existe la tabla
+    if check_dataset_table_exists(connection):
+        print("✅ Dataset ya está cargado en PostgreSQL")
+        table_info = get_dataset_table_info(connection)
+        if table_info:
+            return table_info, True  # True indica que se cargó desde BD
+        else:
+            print("⚠️ Error obteniendo info de tabla existente")
+    
+    # Si no existe, cargar Excel y crear tabla
+    print(f"📂 Cargando archivo Excel: {DATASET_CONFIG['excel_path']}")
+    
+    try:
+        # Verificar que el archivo existe
+        if not os.path.exists(DATASET_CONFIG['excel_path']):
+            print(f"❌ Archivo Excel no encontrado: {DATASET_CONFIG['excel_path']}")
+            return None, False
+        
+        # Cargar DataFrame
+        df = pd.read_excel(DATASET_CONFIG['excel_path'])
+        print(f"📊 Excel cargado: {df.shape[0]} filas, {df.shape[1]} columnas")
+        
+        # Crear tabla en PostgreSQL
+        success, column_mapping = create_dataset_table_from_df(df, connection)
+        if not success:
+            print("❌ No se pudo crear la tabla")
+            return None, False
+        
+        # Insertar datos
+        insert_success = insert_dataframe_to_table(df, column_mapping, connection)
+        if not insert_success:
+            print("❌ No se pudieron insertar los datos")
+            return None, False
+        
+        # Obtener información final de la tabla
+        table_info = get_dataset_table_info(connection)
+        if table_info:
+            print("✅ Dataset cargado exitosamente en PostgreSQL")
+            return table_info, False  # False indica que se cargó desde Excel
+        else:
+            print("⚠️ Tabla creada pero error obteniendo información")
+            return None, False
+            
+    except Exception as e:
+        print(f"❌ Error procesando Excel: {e}")
+        return None, False
 
 # ======================
 # 1. Configuración inicial
 # ======================
-load_dotenv() # Cargar variables de entorno (.env debe contener GOOGLE_API_KEY)
+load_dotenv()
 
 # Crear BD antes de continuar
 print("🚀 Inicializando sistema de análisis de datos...")
@@ -493,11 +796,71 @@ if not test_target_database_connection():
     print("❌ No se pudo conectar a la base de datos objetivo. Terminando aplicación.")
     sys.exit(1)
 
-api_key = os.getenv("GOOGLE_API_KEY")
-os.makedirs("./outputs", exist_ok=True) # Crear carpeta para guardar gráficos si no existe
+# Configurar PostgresSaver PRIMERO
+print("🔧 Configurando PostgresSaver...")
+connection_string = f"postgresql://{load_db_config()['user']}:{load_db_config()['password']}@{load_db_config()['host']}:{load_db_config()['port']}/{load_db_config()['database']}"
 
-# Cargar dataset con pandas
-df = pd.read_excel("./Data/ncr_ride_bookings.xlsx")
+try:
+    conn = psycopg.connect(connection_string)
+    checkpoint_saver = PostgresSaver(conn)
+    checkpoint_saver.setup()
+    print("✅ PostgresSaver configurado exitosamente")
+except Exception as e:
+    print(f"❌ Error configurando PostgresSaver: {e}")
+    print("⚠️ Continuando sin checkpoints...")
+    checkpoint_saver = None
+
+# AHORA cargar dataset (ya tenemos checkpoint_saver configurado o None)
+print("🔄 Inicializando gestión de dataset...")
+
+# Crear conexión temporal si checkpoint_saver falló
+dataset_connection = checkpoint_saver.conn if checkpoint_saver else None
+if dataset_connection is None:
+    try:
+        dataset_connection = psycopg.connect(connection_string)
+        print("🔗 Conexión temporal creada para dataset")
+    except Exception as e:
+        print(f"❌ Error creando conexión temporal: {e}")
+        print("📄 Continuando solo con archivo Excel...")
+        dataset_connection = None
+
+# Cargar dataset
+dataset_info, loaded_from_db = load_excel_to_postgres(dataset_connection)
+
+if dataset_info is None:
+    print("❌ No se pudo cargar el dataset. Terminando aplicación.")
+    sys.exit(1)
+
+# Crear DataFrame temporal
+if loaded_from_db and dataset_connection:
+    print("🔄 Creando DataFrame temporal desde PostgreSQL...")
+    try:
+        with dataset_connection.cursor() as cursor:
+            cursor.execute(f"SELECT * FROM {DATASET_CONFIG['table_schema']}.{DATASET_CONFIG['table_name']} LIMIT 1000")
+            rows = cursor.fetchall()
+            columns = [desc[0] for desc in cursor.description]
+            df = pd.DataFrame(rows, columns=columns)
+            print(f"✅ DataFrame temporal creado: {df.shape}")
+    except Exception as e:
+        print(f"❌ Error creando DataFrame temporal: {e}")
+        print("📄 Fallback: cargando desde Excel...")
+        df = pd.read_excel(DATASET_CONFIG['excel_path'])
+else:
+    df = pd.read_excel(DATASET_CONFIG['excel_path'])
+    print("✅ Dataset cargado desde Excel")
+
+print(f"📊 Dataset listo: {dataset_info['row_count']} filas, {len(dataset_info['columns'])} columnas")
+print(f"🗄️ Tabla: {dataset_info['table_name']}")
+print(f"📋 Columnas: {', '.join(dataset_info['columns'][:5])}{'...' if len(dataset_info['columns']) > 5 else ''}")
+
+# Cerrar conexión temporal si se creó separada
+if dataset_connection and dataset_connection != (checkpoint_saver.conn if checkpoint_saver else None):
+    dataset_connection.close()
+    print("🔗 Conexión temporal cerrada")
+
+# Configurar API y directorios
+api_key = os.getenv("GOOGLE_API_KEY")
+os.makedirs("./outputs", exist_ok=True)
 
 # Inicializar LLM
 llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=api_key, temperature=0)
