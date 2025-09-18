@@ -17,12 +17,31 @@ import psycopg
 from psycopg import sql
 from langgraph.checkpoint.postgres import PostgresSaver
 import uuid
+import json
+
+def clean_data_for_json(data):
+    """Limpia datos para que sean serializables en JSON"""
+    if isinstance(data, dict):
+        return {k: clean_data_for_json(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [clean_data_for_json(item) for item in data]
+    elif pd.isna(data):
+        return "NULL"
+    elif hasattr(data, 'isoformat'):  # Timestamps
+        return data.isoformat()
+    else:
+        return data
 
 # Suprimir warnings de Google Cloud
 import warnings
 warnings.filterwarnings('ignore', message='.*ALTS.*')
 os.environ['GRPC_VERBOSITY'] = 'ERROR'
 os.environ['GRPC_TRACE'] = ''
+
+# ======================
+# Thread ID persistente para memoria a corto plazo
+# ======================
+PERSISTENT_THREAD_ID = "persistent_chat_session"
 
 # ======================
 # 0. Configuración y creación de BD PostgreSQL
@@ -126,6 +145,191 @@ def test_target_database_connection():
         return True
     except psycopg.Error as e:
         print(f"❌ Error al conectar a la base de datos objetivo: {e}")
+        return False
+
+# ======================
+# Funciones de gestión de historial persistente
+# ======================
+
+def check_thread_exists():
+    """Verifica si el thread tiene historial en la tabla personalizada"""
+    if checkpoint_saver is None:
+        print("🔍 Debug - checkpoint_saver es None")
+        return False
+    
+    try:
+        with checkpoint_saver.conn.cursor() as cursor:
+            # Primero verificar si la tabla existe
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'conversation_memory'
+                )
+            """)
+            
+            table_exists = cursor.fetchone()[0]
+            
+            if not table_exists:
+                print("🔍 Debug - Tabla conversation_memory no existe aún")
+                return False
+            
+            # Si la tabla existe, consultar el historial
+            cursor.execute(
+                "SELECT total_queries FROM conversation_memory WHERE thread_id = %s",
+                (PERSISTENT_THREAD_ID,)
+            )
+            result = cursor.fetchone()
+            
+            if result:
+                total_queries = result[0]
+                print(f"🔍 Debug - Conversación encontrada con {total_queries} consultas")
+                return True
+            else:
+                print(f"🔍 Debug - No hay historial para thread {PERSISTENT_THREAD_ID}")
+                return False
+                
+    except Exception as e:
+        print(f"⚠️ Error verificando historial: {e}")
+        return False
+
+def load_previous_context():
+    """Carga el historial desde la tabla personalizada"""
+    if checkpoint_saver is None:
+        print("🔍 Debug - checkpoint_saver es None en load_previous_context")
+        return None
+    
+    try:
+        with checkpoint_saver.conn.cursor() as cursor:
+            # Verificar si la tabla existe primero
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'conversation_memory'
+                )
+            """)
+            
+            table_exists = cursor.fetchone()[0]
+            
+            if not table_exists:
+                print("🔍 Debug - Tabla conversation_memory no existe, no hay contexto previo")
+                return None
+            
+            cursor.execute(
+                "SELECT conversation_data FROM conversation_memory WHERE thread_id = %s",
+                (PERSISTENT_THREAD_ID,)
+            )
+            result = cursor.fetchone()
+            
+            if result:
+                conversation_data = result[0]  # JSONB se deserializa automáticamente
+                print("🔍 Debug - Contexto cargado desde tabla personalizada")
+                return conversation_data
+            else:
+                print("🔍 Debug - No hay contexto guardado")
+                return None
+                
+    except Exception as e:
+        print(f"⚠️ Error cargando contexto: {e}")
+        return None
+
+def get_conversation_summary():
+    """Obtener resumen del historial de conversación actual"""
+    previous_context = load_previous_context()
+    if not previous_context:
+        return "No hay historial previo."
+    
+    # Verificar si previous_context es un diccionario antes de usar .get()
+    if not isinstance(previous_context, dict):
+        return "No hay historial previo válido."
+    
+    conversation_history = previous_context.get("conversation_history", [])
+    if not conversation_history:
+        return "No hay consultas previas en el historial."
+    
+    total_queries = len(conversation_history)
+    last_query = conversation_history[-1].get("query", "N/A") if conversation_history else "N/A"
+    
+    return f"Historial: {total_queries} consultas previas. Última consulta: '{last_query[:50]}...'"
+
+def save_conversation_state(state, config):
+    """Guarda el historial de conversación directamente en PostgreSQL"""
+    if checkpoint_saver is None:
+        print("⚠️ No se puede guardar: checkpoint_saver es None")
+        return False
+    
+    try:
+        # Guardar directamente en una tabla personalizada
+        conversation_history = state.get("conversation_history", [])
+        if not conversation_history:
+            print("⚠️ No hay historial de conversación para guardar")
+            return False
+        
+        # Usar la conexión del checkpoint_saver
+        with checkpoint_saver.conn.cursor() as cursor:
+            # Crear tabla si no existe
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS conversation_memory (
+                    thread_id VARCHAR(255) PRIMARY KEY,
+                    conversation_data JSONB,
+                    total_queries INTEGER,
+                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Preparar datos para guardar
+            conversation_data = {
+                "conversation_history": conversation_history,
+                "session_start_time": state.get("session_start_time", pd.Timestamp.now().isoformat()),
+                "total_queries": state.get("total_queries", 0),
+                "df_info": clean_data_for_json(state.get("df_info", {}))
+            }
+            
+            # Insertar o actualizar
+            cursor.execute("""
+                INSERT INTO conversation_memory (thread_id, conversation_data, total_queries)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (thread_id) 
+                DO UPDATE SET 
+                    conversation_data = EXCLUDED.conversation_data,
+                    total_queries = EXCLUDED.total_queries,
+                    last_updated = CURRENT_TIMESTAMP
+            """, (
+                config["configurable"]["thread_id"],
+                json.dumps(conversation_data, default=str),
+                state.get("total_queries", 0)
+            ))
+            
+            checkpoint_saver.conn.commit()
+            
+        print("💾 Historial guardado en tabla personalizada")
+        return True
+        
+    except Exception as e:
+        print(f"⚠️ Error guardando en BD personalizada: {e}")
+        return False
+    
+def verify_checkpoint_saved(config):
+    """Verifica que el checkpoint se guardó correctamente"""
+    if checkpoint_saver is None:
+        return False
+    
+    try:
+        checkpoints_list = list(checkpoint_saver.list(config))
+        count = len(checkpoints_list)
+        print(f"🔍 Verificación: {count} checkpoints en BD")
+        
+        if count > 0:
+            latest = checkpoints_list[0]
+            if hasattr(latest, 'checkpoint') and latest.checkpoint:
+                channel_values = latest.checkpoint.get("channel_values", {})
+                conversations = channel_values.get("conversation_history", [])
+                print(f"🔍 Conversaciones guardadas: {len(conversations)}")
+                return True
+        
+        return False
+        
+    except Exception as e:
+        print(f"⚠️ Error verificando checkpoint: {e}")
         return False
 
 # ======================
@@ -437,11 +641,14 @@ def build_code_prompt(query: str, execution_history: List[dict] = None, df_info:
     
     # Información básica del DataFrame
     if df_info is None:
+        # Limpiar sample para evitar valores NaN que no se pueden serializar
+        sample_clean = df.head(2).fillna("NULL").to_dict()
+        
         df_info = {
             "columns": list(df.columns),
             "dtypes": df.dtypes.to_dict(),
             "shape": df.shape,
-            "sample": df.head(2).to_dict()
+            "sample": sample_clean
         }
     
     base_prompt = f"""
@@ -496,20 +703,52 @@ class AgentState(TypedDict):
     success: bool                 # Nuevo: flag de éxito
     final_error: Optional[str]    # Nuevo: error final si no se pudo resolver
     thread_id: str  # NUEVO: ID único para identificar la conversación
+    # NUEVOS campos para memoria persistente
+    conversation_history: List[dict]  # Historial completo de consultas y respuestas
+    session_start_time: str          # Timestamp de inicio de sesión
+    total_queries: int               # Contador total acumulativo
+
+# ======================
+# Función para gestionar historial conversacional
+# ======================
+def format_conversation_context(conversation_history: List[dict], max_entries: int = 5) -> str:
+    """Formatea el historial de conversación para incluir en prompts"""
+    if not conversation_history:
+        return ""
+    
+    # Tomar las últimas max_entries consultas
+    recent_history = conversation_history[-max_entries:]
+    
+    context_parts = []
+    for i, entry in enumerate(recent_history, 1):
+        query = entry.get("query", "N/A")
+        response = entry.get("response", "N/A")
+        success = entry.get("success", False)
+        
+        context_parts.append(f"""
+Consulta {i}: {query}
+Respuesta: {response[:200]}{"..." if len(str(response)) > 200 else ""}
+Estado: {'Éxito' if success else 'Error'}
+""")
+    
+    return "\n".join(context_parts)
 
 # ======================
 # 5. Nodos del grafo
 # ======================
 def node_clasificar(state: AgentState):
-    """El LLM decide qué acción tomar con contexto mejorado"""
+    """El LLM decide qué acción tomar con contexto mejorado Y memoria conversacional"""
     
     # Obtener información del DataFrame si no existe
     if not state.get("df_info"):
+        # Limpiar sample para evitar valores NaN
+        sample_clean = df.head(2).fillna("NULL").to_dict()
+        
         state["df_info"] = {
             "columns": list(df.columns),
             "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
             "shape": df.shape,
-            "sample": df.head(2).to_dict()
+            "sample": sample_clean
         }
     
     # Contexto de iteraciones previas
@@ -520,24 +759,37 @@ def node_clasificar(state: AgentState):
             last_error = state["execution_history"][-1].get("error", "")
             iteration_context += f"\nÚltimo error: {last_error}"
 
+    # NUEVO: Contexto conversacional
+    conversation_context = ""
+    if state.get("conversation_history"):
+        conversation_context = f"""
+
+HISTORIAL DE CONVERSACIÓN PREVIA:
+{format_conversation_context(state["conversation_history"])}
+
+IMPORTANTE: Tienes acceso al historial de consultas anteriores. Si el usuario hace referencia a preguntas previas ("la pregunta anterior", "lo que pregunté antes", etc.), usa este historial para responder.
+"""
+
     tools_summary = get_tools_summary(tools)
 
     prompt = f"""
-Eres un asistente de análisis de datos experto. Analiza esta consulta y decide la mejor acción.
+Eres un asistente de análisis de datos experto con memoria conversacional. Analiza esta consulta y decide la mejor acción.
 
-CONSULTA: {state['query']}
+CONSULTA ACTUAL: {state['query']}
 DATAFRAME INFO: Columnas = {state['df_info']['columns']}, Shape = {state['df_info']['shape']}
 {iteration_context}
+{conversation_context}
 
 HERRAMIENTAS DISPONIBLES:
 {tools_summary}
 
 DECISIÓN:
-Analiza la consulta y selecciona la herramienta más adecuada. 
+Analiza la consulta actual considerando el historial previo si es relevante. 
+Selecciona la herramienta más adecuada. 
 Si ninguna herramienta especializada es suficiente, usa Python_Interpreter.
 
 Formato de salida:
-Thought: <análisis detallado de la consulta y estrategia>
+Thought: <análisis detallado de la consulta y estrategia, considerando historial si aplica>
 Action: <nombre exacto de la herramienta elegida>
 """
 
@@ -639,17 +891,28 @@ def node_validar_y_decidir(state: AgentState):
     return state
 
 def node_responder(state: AgentState):
-    """Genera la respuesta final basada en todo el contexto y guarda el checkpoint"""
+    """Genera la respuesta final CON contexto conversacional y actualiza el historial"""
     
     success = state.get("success", False)
     
+    # Contexto conversacional para el prompt
+    conversation_context = ""
+    if state.get("conversation_history"):
+        conversation_context = f"""
+
+HISTORIAL DE CONVERSACIÓN:
+{format_conversation_context(state["conversation_history"])}
+"""
+
     if success:
         prompt = f"""
 Pregunta del usuario: {state['query']}
 Resultado obtenido: {state['result']}
 Número de iteraciones necesarias: {state['iteration_count']}
+{conversation_context}
 
 Genera una respuesta clara y amigable en español explicando qué se logró.
+Si la consulta hace referencia a conversaciones anteriores, asegúrate de conectar tu respuesta con ese contexto.
 """
     else:
         errors_summary = []
@@ -660,6 +923,7 @@ Genera una respuesta clara y amigable en español explicando qué se logró.
         prompt = f"""
 Pregunta del usuario: {state['query']}
 Después de {state['iteration_count']} iteraciones, no se pudo completar la tarea.
+{conversation_context}
 
 Errores encontrados:
 {chr(10).join(errors_summary)}
@@ -672,6 +936,23 @@ Genera una respuesta empática en español explicando:
 
     respuesta = llm.invoke(prompt).content
     print(f"\n🤖 Respuesta Final:\n{respuesta}")
+    
+    # NUEVO: Actualizar historial conversacional
+    new_conversation_entry = {
+        "query": state["query"],
+        "response": respuesta,
+        "success": success,
+        "timestamp": pd.Timestamp.now().isoformat(),
+        "iterations_needed": state["iteration_count"]
+    }
+    
+    # Agregar nueva entrada al historial
+    if "conversation_history" not in state:
+        state["conversation_history"] = []
+    state["conversation_history"].append(new_conversation_entry)
+    
+    # Actualizar contador total
+    state["total_queries"] = state.get("total_queries", 0) + 1
     
     # Log final
     state["history"].append(f"Responder → Finalizado con {'éxito' if success else 'error'}")
@@ -737,85 +1018,106 @@ def main():
     
     print("✅ Base de datos PostgreSQL configurada correctamente")
     print("✅ Sistema de checkpoints activado")
-    print("🚀 Sistema de Análisis de Datos con Iteración Inteligente")
-    print("   Basado en LangGraph con propagación de errores")
+    print("🚀 Sistema de Análisis de Datos con Memoria Persistente")
+    print("   Basado en LangGraph con historial conversacional")
     print("   Escribe 'salir' para terminar\n")
     
-    # Generar un thread_id único para esta sesión
-    import uuid
-    session_id = str(uuid.uuid4())
-    print(f"🔗 Session ID: {session_id}")
+    # NUEVO: Cargar contexto ANTES del bucle para inicialización correcta
+    print("🔍 Verificando historial existente...")
+    thread_exists = check_thread_exists()
+    previous_context = None
+    
+    if thread_exists:
+        previous_context = load_previous_context()
+        if previous_context:
+            summary = get_conversation_summary()
+            print(f"💭 Memoria encontrada: {summary}")
+            print("   Continuando conversación existente...\n")
+        else:
+            print("⚠️ Thread existe pero no se pudo cargar contexto\n")
+            thread_exists = False
+    else:
+        print("🆕 Iniciando nueva conversación\n")
     
     while True:
         query = input("Pregunta sobre el dataset (o 'salir'): ")
         if query.lower() == "salir":
             break
 
-        # Estado inicial con thread_id
-        initial_state = {
-            "query": query,
-            "action": "",
-            "result": None,
-            "thought": "",
-            "history": [],
-            "execution_history": [],
-            "iteration_count": 0,
-            "max_iterations": 3,
-            "df_info": {},
-            "success": False,
-            "final_error": None,
-            "next_node": "clasificar",
-            "thread_id": session_id  # ID único para los checkpoints
-        }
+        # NUEVO: Crear estado inicial basado en contexto pre-cargado
+        if previous_context and isinstance(previous_context, dict):
+            # Continuar desde estado previo
+            initial_state = {
+                "query": query,
+                "action": "",
+                "result": None,
+                "thought": "",
+                "history": [],
+                "execution_history": [],
+                "iteration_count": 0,
+                "max_iterations": 3,
+                "df_info": previous_context.get("df_info", {}),
+                "success": False,
+                "final_error": None,
+                "next_node": "clasificar",
+                "thread_id": PERSISTENT_THREAD_ID,
+                # Cargar historial existente
+                "conversation_history": previous_context.get("conversation_history", []),
+                "session_start_time": previous_context.get("session_start_time", str(pd.Timestamp.now())),
+                "total_queries": previous_context.get("total_queries", 0)
+            }
+        else:
+            # Nuevo estado inicial solo si NO hay contexto previo
+            initial_state = {
+                "query": query,
+                "action": "",
+                "result": None,
+                "thought": "",
+                "history": [],
+                "execution_history": [],
+                "iteration_count": 0,
+                "max_iterations": 3,
+                "df_info": {},
+                "success": False,
+                "final_error": None,
+                "next_node": "clasificar",
+                "thread_id": PERSISTENT_THREAD_ID,
+                # Nuevo historial
+                "conversation_history": [],
+                "session_start_time": str(pd.Timestamp.now()),
+                "total_queries": 0
+            }
 
-        # Configuración para el checkpointer
-        config = {"configurable": {"thread_id": session_id}}
+        # Configuración para el checkpointer con thread fijo
+        config = {"configurable": {"thread_id": PERSISTENT_THREAD_ID}}
 
         print(f"\n{'='*60}")
         print(f"🔄 Procesando consulta: {query}")
+        print(f"💭 Total de consultas en sesión: {initial_state['total_queries']}")
         print(f"{'='*60}")
         
         try:
             final_state = app.invoke(initial_state, config=config)
             
+            # NUEVO: Forzar guardado manual del estado completo
+            save_success = save_conversation_state(final_state, config)
+            
+            # Actualizar contexto para próximas consultas en la misma sesión
+            previous_context = final_state.copy()
+            thread_exists = True
+            
             print(f"\n📊 RESUMEN DE EJECUCIÓN:")
             print(f"   Iteraciones totales: {final_state['iteration_count']}")
             print(f"   Éxito: {final_state.get('success', False)}")
+            print(f"   Total consultas en historial: {final_state.get('total_queries', 0)}")
             if not final_state.get('success', False):
                 print(f"   Error final: {final_state.get('final_error', 'N/A')}")
-            print(f"   Historial: {len(final_state['history'])} eventos")
-            print(f"💾 Checkpoint guardado automáticamente en PostgreSQL")
+            print(f"💾 Checkpoint y memoria guardados automáticamente")
             
         except Exception as e:
             print(f"❌ Error crítico en el sistema: {e}")
             
         print(f"\n{'-'*60}\n")
-
-
-def list_saved_checkpoints():
-    """Función para listar los checkpoints guardados en la BD"""
-    try:
-        # Conectar a la BD y consultar las tablas de checkpoint
-        db_config = load_db_config()
-        with psycopg.connect(
-            host=db_config['host'],
-            port=db_config['port'],
-            user=db_config['user'],
-            password=db_config['password'],
-            dbname=db_config['database']
-        ) as conn:
-            with conn.cursor() as cursor:
-                # Consultar checkpoints
-                cursor.execute("SELECT thread_id, checkpoint_id, created_at FROM checkpoints ORDER BY created_at DESC LIMIT 10;")
-                results = cursor.fetchall()
-                
-                print("📋 Últimos 10 checkpoints guardados:")
-                for row in results:
-                    print(f"   Thread: {row[0][:8]}... | Checkpoint: {row[1][:8]}... | Fecha: {row[2]}")
-        
-    except Exception as e:
-        print(f"❌ Error consultando checkpoints: {e}")
-
 
 if __name__ == "__main__":
     main()
