@@ -32,6 +32,85 @@ def clean_data_for_json(data):
     else:
         return data
 
+# Configuración del límite de conversaciones
+MAX_CONVERSATIONS_PER_THREAD = 10  # Límite recomendado
+
+def cleanup_old_conversations(thread_id: str, max_conversations: int = MAX_CONVERSATIONS_PER_THREAD):
+    """
+    Limpia conversaciones antiguas, manteniendo solo las últimas max_conversations.
+    Retorna True si se realizó limpieza, False si no fue necesario.
+    """
+    if checkpoint_saver is None:
+        print("⚠️ No se puede limpiar: checkpoint_saver es None")
+        return False
+    
+    try:
+        with checkpoint_saver.conn.cursor() as cursor:
+            # Verificar si la tabla existe
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'conversation_memory'
+                )
+            """)
+            
+            table_exists = cursor.fetchone()[0]
+            if not table_exists:
+                return False
+            
+            # Obtener conversaciones actuales
+            cursor.execute(
+                "SELECT conversation_data FROM conversation_memory WHERE thread_id = %s",
+                (thread_id,)
+            )
+            result = cursor.fetchone()
+            
+            if not result:
+                return False
+            
+            conversation_data = result[0]
+            if not isinstance(conversation_data, dict):
+                return False
+            
+            conversation_history = conversation_data.get("conversation_history", [])
+            
+            # Verificar si necesita limpieza
+            if len(conversation_history) <= max_conversations:
+                print(f"🔍 Historial tiene {len(conversation_history)} conversaciones, no necesita limpieza")
+                return False
+            
+            # Conservar solo las últimas max_conversations
+            cleaned_history = conversation_history[-max_conversations:]
+            conversations_removed = len(conversation_history) - len(cleaned_history)
+            
+            # Actualizar datos
+            conversation_data["conversation_history"] = cleaned_history
+            conversation_data["total_queries"] = len(cleaned_history)
+            
+            # Guardar datos actualizados
+            cursor.execute("""
+                UPDATE conversation_memory 
+                SET conversation_data = %s, 
+                    total_queries = %s,
+                    last_updated = CURRENT_TIMESTAMP
+                WHERE thread_id = %s
+            """, (
+                json.dumps(conversation_data, default=str),
+                len(cleaned_history),
+                thread_id
+            ))
+            
+            checkpoint_saver.conn.commit()
+            
+            print(f"🧹 Limpieza completada: eliminadas {conversations_removed} conversaciones antiguas")
+            print(f"   Conservadas: {len(cleaned_history)} conversaciones más recientes")
+            
+            return True
+            
+    except Exception as e:
+        print(f"⚠️ Error en limpieza de conversaciones: {e}")
+        return False
+
 # Suprimir warnings de Google Cloud
 import warnings
 warnings.filterwarnings('ignore', message='.*ALTS.*')
@@ -233,12 +312,11 @@ def load_previous_context():
         return None
 
 def get_conversation_summary():
-    """Obtener resumen del historial de conversación actual"""
+    """Obtener resumen del historial con información del límite"""
     previous_context = load_previous_context()
     if not previous_context:
         return "No hay historial previo."
     
-    # Verificar si previous_context es un diccionario antes de usar .get()
     if not isinstance(previous_context, dict):
         return "No hay historial previo válido."
     
@@ -249,22 +327,88 @@ def get_conversation_summary():
     total_queries = len(conversation_history)
     last_query = conversation_history[-1].get("query", "N/A") if conversation_history else "N/A"
     
-    return f"Historial: {total_queries} consultas previas. Última consulta: '{last_query[:50]}...'"
+    # Información sobre el límite
+    limit_info = f" (límite: {MAX_CONVERSATIONS_PER_THREAD})"
+    
+    return f"Historial: {total_queries}/{MAX_CONVERSATIONS_PER_THREAD} conversaciones{limit_info}. Última: '{last_query[:50]}...'"
+
+def maintenance_cleanup_all_threads():
+    """
+    Función de mantenimiento para limpiar todas las conversaciones que excedan el límite.
+    Útil para ejecutar periódicamente o cuando sea necesario.
+    """
+    if checkpoint_saver is None:
+        print("⚠️ No se puede realizar mantenimiento: checkpoint_saver es None")
+        return False
+    
+    try:
+        with checkpoint_saver.conn.cursor() as cursor:
+            # Verificar si la tabla existe
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'conversation_memory'
+                )
+            """)
+            
+            if not cursor.fetchone()[0]:
+                print("ℹ️ No hay tabla de conversaciones para limpiar")
+                return True
+            
+            # Obtener todos los threads
+            cursor.execute("SELECT thread_id FROM conversation_memory")
+            threads = cursor.fetchall()
+            
+            cleaned_threads = 0
+            total_threads = len(threads)
+            
+            print(f"🧹 Iniciando mantenimiento de {total_threads} threads...")
+            
+            for (thread_id,) in threads:
+                if cleanup_old_conversations(thread_id, MAX_CONVERSATIONS_PER_THREAD):
+                    cleaned_threads += 1
+            
+            print(f"✅ Mantenimiento completado:")
+            print(f"   Threads procesados: {total_threads}")
+            print(f"   Threads limpiados: {cleaned_threads}")
+            print(f"   Threads sin cambios: {total_threads - cleaned_threads}")
+            
+            return True
+            
+    except Exception as e:
+        print(f"❌ Error en mantenimiento general: {e}")
+        return False
 
 def save_conversation_state(state, config):
-    """Guarda el historial de conversación directamente en PostgreSQL"""
+    """
+    Guarda el historial de conversación con límite automático de conversaciones.
+    Mantiene solo las últimas MAX_CONVERSATIONS_PER_THREAD conversaciones.
+    """
     if checkpoint_saver is None:
         print("⚠️ No se puede guardar: checkpoint_saver es None")
         return False
     
     try:
-        # Guardar directamente en una tabla personalizada
         conversation_history = state.get("conversation_history", [])
         if not conversation_history:
             print("⚠️ No hay historial de conversación para guardar")
             return False
         
-        # Usar la conexión del checkpoint_saver
+        thread_id = config["configurable"]["thread_id"]
+        
+        # NUEVO: Aplicar límite de conversaciones antes de guardar
+        if len(conversation_history) > MAX_CONVERSATIONS_PER_THREAD:
+            # Conservar solo las últimas MAX_CONVERSATIONS_PER_THREAD conversaciones
+            conversation_history = conversation_history[-MAX_CONVERSATIONS_PER_THREAD:]
+            conversations_removed = len(state.get("conversation_history", [])) - len(conversation_history)
+            
+            print(f"🧹 Aplicando límite: eliminadas {conversations_removed} conversaciones antiguas")
+            print(f"   Conservando las últimas {len(conversation_history)} conversaciones")
+            
+            # Actualizar el estado con el historial limitado
+            state["conversation_history"] = conversation_history
+            state["total_queries"] = len(conversation_history)
+        
         with checkpoint_saver.conn.cursor() as cursor:
             # Crear tabla si no existe
             cursor.execute("""
@@ -280,8 +424,9 @@ def save_conversation_state(state, config):
             conversation_data = {
                 "conversation_history": conversation_history,
                 "session_start_time": state.get("session_start_time", pd.Timestamp.now().isoformat()),
-                "total_queries": state.get("total_queries", 0),
-                "df_info": clean_data_for_json(state.get("df_info", {}))
+                "total_queries": len(conversation_history),  # Usar longitud actual
+                "df_info": clean_data_for_json(state.get("df_info", {})),
+                "max_conversations_limit": MAX_CONVERSATIONS_PER_THREAD  # Metadata útil
             }
             
             # Insertar o actualizar
@@ -294,14 +439,14 @@ def save_conversation_state(state, config):
                     total_queries = EXCLUDED.total_queries,
                     last_updated = CURRENT_TIMESTAMP
             """, (
-                config["configurable"]["thread_id"],
+                thread_id,
                 json.dumps(conversation_data, default=str),
-                state.get("total_queries", 0)
+                len(conversation_history)
             ))
             
             checkpoint_saver.conn.commit()
             
-        print("💾 Historial guardado en tabla personalizada")
+        print(f"💾 Historial guardado - {len(conversation_history)} conversaciones activas")
         return True
         
     except Exception as e:
@@ -1018,11 +1163,13 @@ def main():
     
     print("✅ Base de datos PostgreSQL configurada correctamente")
     print("✅ Sistema de checkpoints activado")
+    print(f"🔄 Límite de conversaciones: {MAX_CONVERSATIONS_PER_THREAD} por thread")
     print("🚀 Sistema de Análisis de Datos con Memoria Persistente")
-    print("   Basado en LangGraph con historial conversacional")
-    print("   Escribe 'salir' para terminar\n")
+    print("   Basado en LangGraph con historial conversacional limitado")
+    print("   Escribe 'salir' para terminar")
+    print("   Escribe 'limpiar' para forzar limpieza de conversaciones\n")
     
-    # NUEVO: Cargar contexto ANTES del bucle para inicialización correcta
+    # Cargar contexto ANTES del bucle para inicialización correcta
     print("🔍 Verificando historial existente...")
     thread_exists = check_thread_exists()
     previous_context = None
@@ -1033,6 +1180,9 @@ def main():
             summary = get_conversation_summary()
             print(f"💭 Memoria encontrada: {summary}")
             print("   Continuando conversación existente...\n")
+            
+            # NUEVO: Verificar y limpiar si es necesario al inicio
+            cleanup_old_conversations(PERSISTENT_THREAD_ID, MAX_CONVERSATIONS_PER_THREAD)
         else:
             print("⚠️ Thread existe pero no se pudo cargar contexto\n")
             thread_exists = False
@@ -1040,9 +1190,14 @@ def main():
         print("🆕 Iniciando nueva conversación\n")
     
     while True:
-        query = input("Pregunta sobre el dataset (o 'salir'): ")
+        query = input("Pregunta sobre el dataset (o 'salir' / 'limpiar'): ")
+        
         if query.lower() == "salir":
             break
+        elif query.lower() == "limpiar":
+            print("🧹 Ejecutando limpieza manual...")
+            cleanup_old_conversations(PERSISTENT_THREAD_ID, MAX_CONVERSATIONS_PER_THREAD)
+            continue
 
         # NUEVO: Crear estado inicial basado en contexto pre-cargado
         if previous_context and isinstance(previous_context, dict):
