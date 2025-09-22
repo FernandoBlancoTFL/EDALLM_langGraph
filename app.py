@@ -36,28 +36,15 @@ def clean_data_for_json(data):
 MAX_CONVERSATIONS_PER_THREAD = 10  # Límite recomendado
 
 def cleanup_old_conversations(thread_id: str, max_conversations: int = MAX_CONVERSATIONS_PER_THREAD):
-    """
-    Limpia conversaciones antiguas, manteniendo solo las últimas max_conversations.
-    Retorna True si se realizó limpieza, False si no fue necesario.
-    """
-    if checkpoint_saver is None:
-        print("⚠️ No se puede limpiar: checkpoint_saver es None")
+    """Limpia conversaciones antiguas, manteniendo solo las últimas max_conversations"""
+    global history_connection
+    
+    if history_connection is None:
+        print("⚠️ No se puede limpiar: history_connection es None")
         return False
     
     try:
-        with checkpoint_saver.conn.cursor() as cursor:
-            # Verificar si la tabla existe
-            cursor.execute("""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
-                    WHERE table_name = 'conversation_memory'
-                )
-            """)
-            
-            table_exists = cursor.fetchone()[0]
-            if not table_exists:
-                return False
-            
+        with history_connection.cursor() as cursor:
             # Obtener conversaciones actuales
             cursor.execute(
                 "SELECT conversation_data FROM conversation_memory WHERE thread_id = %s",
@@ -100,7 +87,7 @@ def cleanup_old_conversations(thread_id: str, max_conversations: int = MAX_CONVE
                 thread_id
             ))
             
-            checkpoint_saver.conn.commit()
+            history_connection.commit()
             
             print(f"🧹 Limpieza completada: eliminadas {conversations_removed} conversaciones antiguas")
             print(f"   Conservadas: {len(cleaned_history)} conversaciones más recientes")
@@ -151,6 +138,9 @@ def load_db_config():
         sys.exit(1)
     
     return db_config
+
+# Variable global para conexión de historial independiente
+history_connection = None
 
 def database_exists(cursor, db_name):
     """Verifica si una base de datos existe"""
@@ -232,6 +222,42 @@ def test_target_database_connection():
     except psycopg.Error as e:
         print(f"❌ Error al conectar a la base de datos objetivo: {e}")
         return False
+    
+def setup_history_connection():
+    """
+    Configura una conexión independiente solo para el sistema de historial.
+    Esta función no depende de PostgresSaver.
+    """
+    global history_connection
+    
+    print("🔧 Configurando conexión independiente para historial...")
+    
+    try:
+        db_config = load_db_config()
+        connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+        
+        history_connection = psycopg.connect(connection_string)
+        
+        # Crear tabla inmediatamente
+        with history_connection.cursor() as cursor:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS conversation_memory (
+                    thread_id VARCHAR(255) PRIMARY KEY,
+                    conversation_data JSONB,
+                    total_queries INTEGER,
+                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            history_connection.commit()
+        
+        print("✅ Conexión de historial configurada exitosamente")
+        print("✅ Tabla conversation_memory creada/verificada")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error configurando conexión de historial: {e}")
+        history_connection = None
+        return False
 
 # ======================
 # Funciones de gestión de historial persistente
@@ -239,27 +265,14 @@ def test_target_database_connection():
 
 def check_thread_exists():
     """Verifica si el thread tiene historial en la tabla personalizada"""
-    if checkpoint_saver is None:
-        print("🔍 Debug - checkpoint_saver es None")
+    global history_connection
+    
+    if history_connection is None:
+        print("🔍 Debug - history_connection es None")
         return False
     
     try:
-        with checkpoint_saver.conn.cursor() as cursor:
-            # Primero verificar si la tabla existe
-            cursor.execute("""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
-                    WHERE table_name = 'conversation_memory'
-                )
-            """)
-            
-            table_exists = cursor.fetchone()[0]
-            
-            if not table_exists:
-                print("🔍 Debug - Tabla conversation_memory no existe aún")
-                return False
-            
-            # Si la tabla existe, consultar el historial
+        with history_connection.cursor() as cursor:
             cursor.execute(
                 "SELECT total_queries FROM conversation_memory WHERE thread_id = %s",
                 (PERSISTENT_THREAD_ID,)
@@ -280,26 +293,14 @@ def check_thread_exists():
 
 def load_previous_context():
     """Carga el historial desde la tabla personalizada"""
-    if checkpoint_saver is None:
-        print("🔍 Debug - checkpoint_saver es None en load_previous_context")
+    global history_connection
+    
+    if history_connection is None:
+        print("🔍 Debug - history_connection es None en load_previous_context")
         return None
     
     try:
-        with checkpoint_saver.conn.cursor() as cursor:
-            # Verificar si la tabla existe primero
-            cursor.execute("""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
-                    WHERE table_name = 'conversation_memory'
-                )
-            """)
-            
-            table_exists = cursor.fetchone()[0]
-            
-            if not table_exists:
-                print("🔍 Debug - Tabla conversation_memory no existe, no hay contexto previo")
-                return None
-            
+        with history_connection.cursor() as cursor:
             cursor.execute(
                 "SELECT conversation_data FROM conversation_memory WHERE thread_id = %s",
                 (PERSISTENT_THREAD_ID,)
@@ -387,12 +388,11 @@ def maintenance_cleanup_all_threads():
         return False
 
 def save_conversation_state(state, config):
-    """
-    Guarda el historial de conversación con límite automático de conversaciones.
-    Mantiene solo las últimas MAX_CONVERSATIONS_PER_THREAD conversaciones.
-    """
-    if checkpoint_saver is None:
-        print("⚠️ No se puede guardar: checkpoint_saver es None")
+    """Guarda el historial de conversación usando la conexión independiente"""
+    global history_connection
+    
+    if history_connection is None:
+        print("⚠️ No se puede guardar: history_connection es None")
         return False
     
     try:
@@ -403,9 +403,8 @@ def save_conversation_state(state, config):
         
         thread_id = config["configurable"]["thread_id"]
         
-        # NUEVO: Aplicar límite de conversaciones antes de guardar
+        # Aplicar límite de conversaciones antes de guardar
         if len(conversation_history) > MAX_CONVERSATIONS_PER_THREAD:
-            # Conservar solo las últimas MAX_CONVERSATIONS_PER_THREAD conversaciones
             conversation_history = conversation_history[-MAX_CONVERSATIONS_PER_THREAD:]
             conversations_removed = len(state.get("conversation_history", [])) - len(conversation_history)
             
@@ -416,24 +415,14 @@ def save_conversation_state(state, config):
             state["conversation_history"] = conversation_history
             state["total_queries"] = len(conversation_history)
         
-        with checkpoint_saver.conn.cursor() as cursor:
-            # Crear tabla si no existe
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS conversation_memory (
-                    thread_id VARCHAR(255) PRIMARY KEY,
-                    conversation_data JSONB,
-                    total_queries INTEGER,
-                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            
+        with history_connection.cursor() as cursor:
             # Preparar datos para guardar
             conversation_data = {
                 "conversation_history": conversation_history,
                 "session_start_time": state.get("session_start_time", pd.Timestamp.now().isoformat()),
-                "total_queries": len(conversation_history),  # Usar longitud actual
+                "total_queries": len(conversation_history),
                 "df_info": clean_data_for_json(state.get("df_info", {})),
-                "max_conversations_limit": MAX_CONVERSATIONS_PER_THREAD  # Metadata útil
+                "max_conversations_limit": MAX_CONVERSATIONS_PER_THREAD
             }
             
             # Insertar o actualizar
@@ -451,7 +440,7 @@ def save_conversation_state(state, config):
                 len(conversation_history)
             ))
             
-            checkpoint_saver.conn.commit()
+            history_connection.commit()
             
         print(f"💾 Historial guardado - {len(conversation_history)} conversaciones activas")
         return True
@@ -810,6 +799,9 @@ except Exception as e:
     print("⚠️ Continuando sin checkpoints...")
     checkpoint_saver = None
 
+# NUEVO: Configurar sistema de historial independiente
+setup_history_connection()
+
 # AHORA cargar dataset (ya tenemos checkpoint_saver configurado o None)
 print("🔄 Inicializando gestión de dataset...")
 
@@ -865,34 +857,6 @@ os.makedirs("./outputs", exist_ok=True)
 # Inicializar LLM
 llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=api_key, temperature=0)
 # llm = ChatOllama(model="gemma3", temperature=0)
-
-# ======================
-# 1,5. Configurar PostgresSaver para guardar checkpoints
-# ======================
-
-def get_postgres_connection_string():
-    """Genera la cadena de conexión para PostgreSQL usando psycopg3"""
-    db_config = load_db_config()
-    return f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
-
-# Configurar PostgresSaver correctamente
-connection_string = get_postgres_connection_string()
-
-try:
-    # Método 1: Crear conexión directa usando psycopg
-    import psycopg
-    conn = psycopg.connect(connection_string)
-    
-    # Crear PostgresSaver con la conexión directa
-    checkpoint_saver = PostgresSaver(conn)
-    checkpoint_saver.setup()
-    
-    print("✅ PostgresSaver configurado exitosamente")
-    
-except Exception as e:
-    print(f"❌ Error configurando PostgresSaver: {e}")
-    print("⚠️ Continuando sin checkpoints...")
-    checkpoint_saver = None
 
 # ======================
 # 2. Definir intérprete Python con acceso a df
@@ -1445,7 +1409,7 @@ Genera una respuesta empática en español explicando:
     respuesta = llm.invoke(prompt).content
     print(f"\n🤖 Respuesta Final:\n{respuesta}")
     
-    # NUEVO: Actualizar historial conversacional
+    # ACTUALIZAR historial conversacional
     new_conversation_entry = {
         "query": state["query"],
         "response": respuesta,
@@ -1461,6 +1425,15 @@ Genera una respuesta empática en español explicando:
     
     # Actualizar contador total
     state["total_queries"] = state.get("total_queries", 0) + 1
+    
+    # NUEVO: GUARDAR ESTADO INMEDIATAMENTE
+    config = {"configurable": {"thread_id": state.get("thread_id", PERSISTENT_THREAD_ID)}}
+    save_success = save_conversation_state(state, config)
+    
+    if save_success:
+        print(f"💾 Historial guardado exitosamente - {state['total_queries']} consultas totales")
+    else:
+        print("⚠️ Error guardando historial en base de datos")
     
     # Log final
     state["history"].append(f"Responder → Finalizado con {'éxito' if success else 'error'}")
@@ -1532,6 +1505,12 @@ def main():
     print("   Escribe 'salir' para terminar")
     print("   Escribe 'limpiar' para forzar limpieza de conversaciones\n")
     
+    # El sistema de historial ya está configurado, no necesitamos forzar creación
+    if history_connection:
+        print("🔧 Sistema de historial listo")
+    else:
+        print("⚠️ Sistema de historial no disponible")
+    
     # Cargar contexto ANTES del bucle para inicialización correcta
     print("🔍 Verificando historial existente...")
     thread_exists = check_thread_exists()
@@ -1544,7 +1523,7 @@ def main():
             print(f"💭 Memoria encontrada: {summary}")
             print("   Continuando conversación existente...\n")
             
-            # NUEVO: Verificar y limpiar si es necesario al inicio
+            # Verificar y limpiar si es necesario al inicio
             cleanup_old_conversations(PERSISTENT_THREAD_ID, MAX_CONVERSATIONS_PER_THREAD)
         else:
             print("⚠️ Thread existe pero no se pudo cargar contexto\n")
@@ -1562,7 +1541,7 @@ def main():
             cleanup_old_conversations(PERSISTENT_THREAD_ID, MAX_CONVERSATIONS_PER_THREAD)
             continue
 
-        # NUEVO: Crear estado inicial basado en contexto pre-cargado
+        # Crear estado inicial basado en contexto pre-cargado
         if previous_context and isinstance(previous_context, dict):
             # Continuar desde estado previo
             initial_state = {
@@ -1617,9 +1596,6 @@ def main():
         try:
             final_state = app.invoke(initial_state, config=config)
             
-            # NUEVO: Forzar guardado manual del estado completo
-            save_success = save_conversation_state(final_state, config)
-            
             # Actualizar contexto para próximas consultas en la misma sesión
             previous_context = final_state.copy()
             thread_exists = True
@@ -1630,7 +1606,6 @@ def main():
             print(f"   Total consultas en historial: {final_state.get('total_queries', 0)}")
             if not final_state.get('success', False):
                 print(f"   Error final: {final_state.get('final_error', 'N/A')}")
-            print(f"💾 Checkpoint y memoria guardados automáticamente")
             
         except Exception as e:
             print(f"❌ Error crítico en el sistema: {e}")
