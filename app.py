@@ -109,6 +109,9 @@ os.environ['GRPC_TRACE'] = ''
 # ======================
 PERSISTENT_THREAD_ID = "persistent_chat_session"
 
+# Variable para controlar el guardado automático del Excel a PostgreSQL
+ENABLE_AUTO_SAVE_TO_DB = True  # Cambiar a False para desactivar
+
 # Configuración del archivo Excel y tabla PostgreSQL
 DATASET_CONFIG = {
     "excel_path": "./Data/ncr_ride_bookings.xlsx",
@@ -258,6 +261,70 @@ def setup_history_connection():
         print(f"❌ Error configurando conexión de historial: {e}")
         history_connection = None
         return False
+    
+def initialize_dataset_on_startup():
+    """
+    Inicializa el dataset en BD SOLO si ENABLE_AUTO_SAVE_TO_DB es True.
+    Se ejecuta automáticamente al iniciar el programa.
+    """
+    global ENABLE_AUTO_SAVE_TO_DB
+    
+    if not ENABLE_AUTO_SAVE_TO_DB:
+        print("💾 Guardado automático desactivado - No se creará tabla al inicio")
+        return True
+    
+    print("💾 Guardado automático activado - Verificando/creando tabla del dataset...")
+    
+    # Crear conexión para verificar/crear tabla
+    dataset_connection = checkpoint_saver.conn if checkpoint_saver else None
+    if dataset_connection is None:
+        try:
+            dataset_connection = psycopg.connect(connection_string)
+            print("🔗 Conexión creada para inicialización de dataset")
+        except Exception as e:
+            print(f"❌ Error creando conexión para dataset: {e}")
+            return False
+    
+    # Verificar si la tabla ya existe
+    if check_dataset_table_exists(dataset_connection):
+        print("✅ Tabla del dataset ya existe en BD")
+        # Cerrar conexión temporal si se creó
+        if dataset_connection != (checkpoint_saver.conn if checkpoint_saver else None):
+            dataset_connection.close()
+        return True
+    
+    # Si no existe, crear tabla desde Excel
+    try:
+        if not os.path.exists(DATASET_CONFIG['excel_path']):
+            print(f"❌ Archivo Excel no encontrado: {DATASET_CONFIG['excel_path']}")
+            return False
+        
+        print("📂 Cargando Excel para crear tabla en BD...")
+        df_temp = pd.read_excel(DATASET_CONFIG['excel_path'])
+        
+        # Crear tabla
+        success, column_mapping = create_dataset_table_from_df(df_temp, dataset_connection)
+        if not success:
+            print("❌ No se pudo crear la tabla")
+            return False
+        
+        # Insertar datos
+        insert_success = insert_dataframe_to_table(df_temp, column_mapping, dataset_connection)
+        if insert_success:
+            print("✅ Dataset inicializado correctamente en BD al iniciar el programa")
+        else:
+            print("❌ Error insertando datos al inicializar")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Error en inicialización del dataset: {e}")
+        return False
+    finally:
+        # Cerrar conexión temporal si se creó
+        if dataset_connection and dataset_connection != (checkpoint_saver.conn if checkpoint_saver else None):
+            dataset_connection.close()
+    
+    return True
 
 # ======================
 # Funciones de gestión de historial persistente
@@ -717,12 +784,14 @@ def insert_dataframe_to_table(df: pd.DataFrame, column_mapping: dict, connection
             conn.rollback()
         return False
 
-def load_excel_to_postgres(connection=None):
+def load_excel_to_postgres(connection=None, force_load=False):
     """
     Función principal que carga el archivo Excel a PostgreSQL si no existe.
-    Acepta una conexión opcional para resolver el problema de dependencias.
+    Acepta una conexión opcional y un flag para forzar carga.
     """
-    # Verificar si ya existe la tabla
+    global ENABLE_AUTO_SAVE_TO_DB
+
+    # Verificar si ya existe la tabla SIEMPRE (independiente de ENABLE_AUTO_SAVE_TO_DB)
     if check_dataset_table_exists(connection):
         print("✅ Dataset ya está cargado en PostgreSQL")
         table_info = get_dataset_table_info(connection)
@@ -731,7 +800,7 @@ def load_excel_to_postgres(connection=None):
         else:
             print("⚠️ Error obteniendo info de tabla existente")
     
-    # Si no existe, cargar Excel y crear tabla
+    # Si no existe, cargar Excel y crear tabla (solo si está activado)
     print(f"📂 Cargando archivo Excel: {DATASET_CONFIG['excel_path']}")
     
     try:
@@ -741,17 +810,27 @@ def load_excel_to_postgres(connection=None):
             return None, False
         
         # Cargar DataFrame
-        df = pd.read_excel(DATASET_CONFIG['excel_path'])
-        print(f"📊 Excel cargado: {df.shape[0]} filas, {df.shape[1]} columnas")
+        df_temp = pd.read_excel(DATASET_CONFIG['excel_path'])
+        print(f"📊 Excel cargado: {df_temp.shape[0]} filas, {df_temp.shape[1]} columnas")
         
-        # Crear tabla en PostgreSQL
-        success, column_mapping = create_dataset_table_from_df(df, connection)
+        # Si el guardado está desactivado, retornar solo info del Excel
+        if not ENABLE_AUTO_SAVE_TO_DB:
+            table_info = {
+                "columns": list(df_temp.columns),
+                "dtypes": {col: str(dtype) for col, dtype in df_temp.dtypes.items()},
+                "row_count": len(df_temp),
+                "table_name": "excel_only_mode"
+            }
+            return table_info, False
+        
+        # Crear tabla en PostgreSQL (solo si está activado)
+        success, column_mapping = create_dataset_table_from_df(df_temp, connection)
         if not success:
             print("❌ No se pudo crear la tabla")
             return None, False
         
         # Insertar datos
-        insert_success = insert_dataframe_to_table(df, column_mapping, connection)
+        insert_success = insert_dataframe_to_table(df_temp, column_mapping, connection)
         if not insert_success:
             print("❌ No se pudieron insertar los datos")
             return None, False
@@ -802,53 +881,79 @@ except Exception as e:
 # NUEVO: Configurar sistema de historial independiente
 setup_history_connection()
 
-# AHORA cargar dataset (ya tenemos checkpoint_saver configurado o None)
-print("🔄 Inicializando gestión de dataset...")
+# NUEVO: Inicializar dataset en BD si ENABLE_AUTO_SAVE_TO_DB está activado
+print("🔄 Inicializando sistema de dataset...")
+if not initialize_dataset_on_startup():
+    print("⚠️ Advertencia: Error en inicialización del dataset, continuando con funcionalidad limitada")
 
-# Crear conexión temporal si checkpoint_saver falló
-dataset_connection = checkpoint_saver.conn if checkpoint_saver else None
-if dataset_connection is None:
-    try:
-        dataset_connection = psycopg.connect(connection_string)
-        print("🔗 Conexión temporal creada para dataset")
-    except Exception as e:
-        print(f"❌ Error creando conexión temporal: {e}")
-        print("📄 Continuando solo con archivo Excel...")
-        dataset_connection = None
+print("🔄 Sistema preparado para carga de dataset bajo demanda...")
 
-# Cargar dataset
-dataset_info, loaded_from_db = load_excel_to_postgres(dataset_connection)
+# Variables globales para el dataset
+dataset_info = None
+df = None
+dataset_loaded = False
 
-if dataset_info is None:
-    print("❌ No se pudo cargar el dataset. Terminando aplicación.")
-    sys.exit(1)
-
-# Crear DataFrame temporal
-if loaded_from_db and dataset_connection:
-    print("🔄 Creando DataFrame temporal desde PostgreSQL...")
-    try:
-        with dataset_connection.cursor() as cursor:
-            cursor.execute(f"SELECT * FROM {DATASET_CONFIG['table_schema']}.{DATASET_CONFIG['table_name']} LIMIT 1000")
-            rows = cursor.fetchall()
-            columns = [desc[0] for desc in cursor.description]
-            df = pd.DataFrame(rows, columns=columns)
-            print(f"✅ DataFrame temporal creado: {df.shape}")
-    except Exception as e:
-        print(f"❌ Error creando DataFrame temporal: {e}")
-        print("📄 Fallback: cargando desde Excel...")
+def ensure_dataset_loaded():
+    """
+    Función para cargar el dataset solo cuando sea necesario.
+    Carga el dataset completo sin límites.
+    """
+    global dataset_info, df, dataset_loaded
+    
+    if dataset_loaded and df is not None:
+        print("✅ Dataset ya está cargado en memoria")
+        return True
+    
+    print("🔄 Cargando dataset bajo demanda...")
+    
+    # SIEMPRE crear conexión para verificar tabla (independiente de ENABLE_AUTO_SAVE_TO_DB)
+    dataset_connection = checkpoint_saver.conn if checkpoint_saver else None
+    if dataset_connection is None:
+        try:
+            dataset_connection = psycopg.connect(connection_string)
+            print("🔗 Conexión temporal creada para dataset")
+        except Exception as e:
+            print(f"❌ Error creando conexión temporal: {e}")
+            print("📄 Continuando solo con archivo Excel...")
+            dataset_connection = None
+    
+    # Cargar dataset (ahora siempre con conexión si es posible)
+    dataset_info, loaded_from_db = load_excel_to_postgres(dataset_connection, force_load=False)
+    
+    if dataset_info is None:
+        print("❌ No se pudo cargar el dataset")
+        return False
+    
+    # Crear DataFrame completo (SIN LÍMITES)
+    if loaded_from_db and dataset_connection:
+        print("🔄 Creando DataFrame completo desde PostgreSQL...")
+        try:
+            with dataset_connection.cursor() as cursor:
+                # CARGAR COMPLETO - SIN LÍMITE
+                cursor.execute(f"SELECT * FROM {DATASET_CONFIG['table_schema']}.{DATASET_CONFIG['table_name']}")
+                rows = cursor.fetchall()
+                columns = [desc[0] for desc in cursor.description]
+                df = pd.DataFrame(rows, columns=columns)
+                print(f"✅ DataFrame completo creado desde BD: {df.shape}")
+        except Exception as e:
+            print(f"❌ Error creando DataFrame desde BD: {e}")
+            print("📄 Fallback: cargando desde Excel...")
+            df = pd.read_excel(DATASET_CONFIG['excel_path'])
+    else:
+        # Cargar desde Excel (siempre completo)
         df = pd.read_excel(DATASET_CONFIG['excel_path'])
-else:
-    df = pd.read_excel(DATASET_CONFIG['excel_path'])
-    print("✅ Dataset cargado desde Excel")
-
-print(f"📊 Dataset listo: {dataset_info['row_count']} filas, {len(dataset_info['columns'])} columnas")
-print(f"🗄️ Tabla: {dataset_info['table_name']}")
-print(f"📋 Columnas: {', '.join(dataset_info['columns'][:5])}{'...' if len(dataset_info['columns']) > 5 else ''}")
-
-# Cerrar conexión temporal si se creó separada
-if dataset_connection and dataset_connection != (checkpoint_saver.conn if checkpoint_saver else None):
-    dataset_connection.close()
-    print("🔗 Conexión temporal cerrada")
+        print(f"✅ Dataset completo cargado desde Excel: {df.shape}")
+    
+    dataset_loaded = True
+    print(f"📊 Dataset listo: {len(df)} filas, {len(df.columns)} columnas")
+    print(f"🗄️ Modo: {'PostgreSQL' if loaded_from_db else 'Excel'}")
+    
+    # Cerrar conexión temporal si se creó separada
+    if dataset_connection and dataset_connection != (checkpoint_saver.conn if checkpoint_saver else None):
+        dataset_connection.close()
+        print("🔗 Conexión temporal cerrada")
+    
+    return True
 
 # Configurar API y directorios
 api_key = os.getenv("GOOGLE_API_KEY")
@@ -868,6 +973,15 @@ def run_python_with_df(code: str, error_context: Optional[str] = None):
     Ejecuta código Python con acceso al DataFrame `df` ya cargado.
     Incluye contexto de errores previos para mejor debugging.
     """
+    # Asegurar que el dataset esté cargado
+    if not ensure_dataset_loaded():
+        return {
+            "success": False,
+            "result": None,
+            "error": "No se pudo cargar el dataset",
+            "error_type": "dataset_loading_error"
+        }
+    
     local_vars = {"df": df, "pd": pd, "plt": plt, "sns": sns, "os": os}
 
     prohibited_patterns = [
@@ -930,6 +1044,10 @@ def get_dataframe(_):
     Devuelve el DataFrame completo al LLM.
     Este tool permite que el agente acceda a 'df' directamente para cualquier análisis.
     """
+    # Asegurar que el dataset esté cargado
+    if not ensure_dataset_loaded():
+        return "Error: No se pudo cargar el dataset"
+    
     return df
 
 def get_summary(_):
@@ -1500,8 +1618,9 @@ def main():
     print("✅ Base de datos PostgreSQL configurada correctamente")
     print("✅ Sistema de checkpoints activado")
     print(f"🔄 Límite de conversaciones: {MAX_CONVERSATIONS_PER_THREAD} por thread")
+    print(f"💾 Guardado automático a BD: {'ACTIVADO' if ENABLE_AUTO_SAVE_TO_DB else 'DESACTIVADO'}")
     print("🚀 Sistema de Análisis de Datos con Memoria Persistente")
-    print("   Basado en LangGraph con historial conversacional limitado")
+    print("   Dataset se cargará al hacer la primera consulta")
     print("   Escribe 'salir' para terminar")
     print("   Escribe 'limpiar' para forzar limpieza de conversaciones\n")
     
