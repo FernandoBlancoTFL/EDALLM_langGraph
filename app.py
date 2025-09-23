@@ -676,6 +676,141 @@ def get_dataset_table_info(connection=None):
         print(f"⚠️ Error obteniendo información de tabla: {e}")
         return None
 
+def get_dataset_table_info_by_name(table_name, connection=None):
+    """
+    Obtiene información de una tabla específica por nombre.
+    """
+    conn = connection
+    
+    if conn is None:
+        conn = checkpoint_saver.conn if checkpoint_saver else None
+    
+    if conn is None:
+        try:
+            db_config = load_db_config()
+            temp_connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+            conn = psycopg.connect(temp_connection_string)
+            temp_connection = True
+        except Exception as e:
+            return None
+    else:
+        temp_connection = False
+    
+    try:
+        with conn.cursor() as cursor:
+            # Obtener información de columnas
+            cursor.execute("""
+                SELECT column_name, data_type, is_nullable
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = %s
+                ORDER BY ordinal_position
+            """, (table_name,))
+            
+            columns_info = cursor.fetchall()
+            
+            # Obtener conteo de filas
+            cursor.execute(f'SELECT COUNT(*) FROM public."{table_name}"')
+            row_count = cursor.fetchone()[0]
+            
+            # Formatear información
+            columns = [col[0] for col in columns_info]
+            dtypes = {col[0]: col[1] for col in columns_info}
+            
+            return {
+                "columns": columns,
+                "dtypes": dtypes,
+                "row_count": row_count,
+                "table_name": table_name
+            }
+            
+    except Exception as e:
+        print(f"⚠️ Error obteniendo información de tabla {table_name}: {e}")
+        return None
+    finally:
+        if temp_connection:
+            conn.close()
+    
+def list_stored_tables(connection=None):
+    """
+    Lista todas las tablas almacenadas en la BD, excluyendo tablas del sistema.
+    """
+    # Intentar múltiples fuentes de conexión
+    conn = connection
+    
+    if conn is None:
+        conn = checkpoint_saver.conn if checkpoint_saver else None
+    
+    if conn is None:
+        # Crear conexión temporal si no hay ninguna disponible
+        try:
+            db_config = load_db_config()
+            temp_connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+            conn = psycopg.connect(temp_connection_string)
+            temp_connection = True
+            print("🔗 Conexión temporal creada para listar tablas")
+        except Exception as e:
+            print(f"⚠️ No se pudo crear conexión para listar tablas: {e}")
+            return []
+    else:
+        temp_connection = False
+    
+    try:
+        with conn.cursor() as cursor:
+            # Primera consulta: verificar todas las tablas en el esquema public
+            cursor.execute("""
+                SELECT table_name, table_type
+                FROM information_schema.tables 
+                WHERE table_schema = 'public'
+                ORDER BY table_name
+            """)
+            
+            all_tables = cursor.fetchall()
+            
+            # Filtrar tablas del sistema
+            dataset_tables = []
+            system_tables = ['conversation_memory', 'checkpoints']
+            
+            for table_name, table_type in all_tables:
+                # Excluir tablas del sistema
+                is_system_table = (
+                    table_name == 'conversation_memory' or
+                    table_name.startswith('checkpoints') or
+                    table_name in system_tables
+                )
+                
+                if not is_system_table:
+                    dataset_tables.append(table_name)
+            
+            return dataset_tables
+            
+    except Exception as e:
+        print(f"⚠️ Error listando tablas: {e}")
+        return []
+    finally:
+        # Cerrar conexión temporal si se creó
+        if temp_connection:
+            conn.close()
+
+def show_stored_files():
+    """
+    Muestra los archivos almacenados en la BD de forma amigable.
+    """
+    print("🔍 Buscando tablas en la base de datos...")
+    stored_tables = list_stored_tables()
+    
+    if not stored_tables:
+        print("📁 No se encontraron tablas de dataset en la base de datos")
+        print("💡 Verifica que las tablas se hayan creado correctamente")
+        
+        # Mostrar información adicional para debugging
+        print("\n🔧 Para verificar manualmente, puedes ejecutar en PostgreSQL:")
+        print("   SELECT table_name FROM information_schema.tables WHERE table_schema = 'public';")
+        return
+    
+    print(f"📁 Archivos almacenados en la base de datos ({len(stored_tables)} encontrados):")
+    for i, table_name in enumerate(stored_tables, 1):
+        print(f"   {i}. {table_name}")
+
 def create_dataset_table_from_df(df: pd.DataFrame, connection=None, table_name=None, table_schema=None):
     """
     Crea una tabla en PostgreSQL desde un DataFrame.
@@ -1656,6 +1791,10 @@ def main():
         print("🔧 Sistema de historial listo")
     else:
         print("⚠️ Sistema de historial no disponible")
+
+    # Mostrar archivos almacenados
+    show_stored_files()
+    print()
     
     # Cargar contexto ANTES del bucle para inicialización correcta
     print("🔍 Verificando historial existente...")
