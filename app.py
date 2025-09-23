@@ -110,14 +110,23 @@ os.environ['GRPC_TRACE'] = ''
 PERSISTENT_THREAD_ID = "persistent_chat_session"
 
 # Variable para controlar el guardado automático del Excel a PostgreSQL
-ENABLE_AUTO_SAVE_TO_DB = True  # Cambiar a False para desactivar
+ENABLE_AUTO_SAVE_TO_DB = False  # Cambiar a False para desactivar
 
 # Configuración del archivo Excel y tabla PostgreSQL
-DATASET_CONFIG = {
-    "excel_path": "./Data/ncr_ride_bookings.xlsx",
-    "table_name": "dataset_rides",
-    "table_schema": "public"
-}
+DATASETS_TO_PROCESS = [
+    {
+        "excel_path": "./Data/ncr_ride_bookings.xlsx",
+        "table_name": "dataset_rides",
+        "table_schema": "public"
+    },
+    {
+        "excel_path": "./Data/crocodile_dataset.xlsx",
+        "table_name": "crocodile_dataset", 
+        "table_schema": "public"
+    }
+]
+
+DATASET_CONFIG = DATASETS_TO_PROCESS[0]  # Mantener ncr_ride_bookings como principal
 
 # ======================
 # 0. Configuración y creación de BD PostgreSQL
@@ -264,67 +273,76 @@ def setup_history_connection():
     
 def initialize_dataset_on_startup():
     """
-    Inicializa el dataset en BD SOLO si ENABLE_AUTO_SAVE_TO_DB es True.
+    Inicializa todos los datasets en BD SOLO si ENABLE_AUTO_SAVE_TO_DB es True.
     Se ejecuta automáticamente al iniciar el programa.
     """
     global ENABLE_AUTO_SAVE_TO_DB
     
     if not ENABLE_AUTO_SAVE_TO_DB:
-        print("💾 Guardado automático desactivado - No se creará tabla al inicio")
+        print("💾 Guardado automático desactivado - No se crearán tablas al inicio")
         return True
     
-    print("💾 Guardado automático activado - Verificando/creando tabla del dataset...")
+    print("💾 Guardado automático activado - Verificando/creando tablas de datasets...")
     
-    # Crear conexión para verificar/crear tabla
+    # Crear conexión para verificar/crear tablas
     dataset_connection = checkpoint_saver.conn if checkpoint_saver else None
     if dataset_connection is None:
         try:
             dataset_connection = psycopg.connect(connection_string)
-            print("🔗 Conexión creada para inicialización de dataset")
+            print("🔗 Conexión creada para inicialización de datasets")
         except Exception as e:
-            print(f"❌ Error creando conexión para dataset: {e}")
+            print(f"❌ Error creando conexión para datasets: {e}")
             return False
     
-    # Verificar si la tabla ya existe
-    if check_dataset_table_exists(dataset_connection):
-        print("✅ Tabla del dataset ya existe en BD")
-        # Cerrar conexión temporal si se creó
-        if dataset_connection != (checkpoint_saver.conn if checkpoint_saver else None):
-            dataset_connection.close()
-        return True
+    success_count = 0
+    total_files = len(DATASETS_TO_PROCESS)
     
-    # Si no existe, crear tabla desde Excel
     try:
-        if not os.path.exists(DATASET_CONFIG['excel_path']):
-            print(f"❌ Archivo Excel no encontrado: {DATASET_CONFIG['excel_path']}")
-            return False
+        for dataset_config in DATASETS_TO_PROCESS:
+            excel_path = dataset_config['excel_path']
+            table_name = dataset_config['table_name']
+            table_schema = dataset_config['table_schema']
+            
+            print(f"\n🔍 Procesando: {os.path.basename(excel_path)} → {table_name}")
+            
+            # Verificar si la tabla ya existe
+            if check_dataset_table_exists(dataset_connection, table_name, table_schema):
+                print(f"✅ Tabla '{table_name}' ya existe en BD")
+                success_count += 1
+                continue
+            
+            # Verificar que el archivo existe
+            if not os.path.exists(excel_path):
+                print(f"❌ Archivo Excel no encontrado: {excel_path}")
+                continue
+            
+            print(f"📂 Cargando Excel para crear tabla en BD...")
+            df_temp = pd.read_excel(excel_path)
+            
+            # Crear tabla
+            success, column_mapping = create_dataset_table_from_df(df_temp, dataset_connection, table_name, table_schema)
+            if not success:
+                print(f"❌ No se pudo crear la tabla {table_name}")
+                continue
+            
+            # Insertar datos
+            insert_success = insert_dataframe_to_table(df_temp, column_mapping, dataset_connection, table_name, table_schema)
+            if insert_success:
+                print(f"✅ Dataset '{table_name}' inicializado correctamente en BD")
+                success_count += 1
+            else:
+                print(f"❌ Error insertando datos en {table_name}")
         
-        print("📂 Cargando Excel para crear tabla en BD...")
-        df_temp = pd.read_excel(DATASET_CONFIG['excel_path'])
-        
-        # Crear tabla
-        success, column_mapping = create_dataset_table_from_df(df_temp, dataset_connection)
-        if not success:
-            print("❌ No se pudo crear la tabla")
-            return False
-        
-        # Insertar datos
-        insert_success = insert_dataframe_to_table(df_temp, column_mapping, dataset_connection)
-        if insert_success:
-            print("✅ Dataset inicializado correctamente en BD al iniciar el programa")
-        else:
-            print("❌ Error insertando datos al inicializar")
-            return False
+        print(f"\n📋 Resumen: {success_count}/{total_files} datasets inicializados correctamente")
+        return success_count > 0
             
     except Exception as e:
-        print(f"❌ Error en inicialización del dataset: {e}")
+        print(f"❌ Error en inicialización de datasets: {e}")
         return False
     finally:
         # Cerrar conexión temporal si se creó
         if dataset_connection and dataset_connection != (checkpoint_saver.conn if checkpoint_saver else None):
             dataset_connection.close()
-    
-    return True
 
 # ======================
 # Funciones de gestión de historial persistente
@@ -582,16 +600,19 @@ def sanitize_column_name(column_name: str) -> str:
     
     return clean_name or 'unnamed_column'
 
-def check_dataset_table_exists(connection=None):
+def check_dataset_table_exists(connection=None, table_name=None, table_schema=None):
     """
-    Verifica si la tabla del dataset existe en PostgreSQL.
-    Acepta una conexión opcional o usa checkpoint_saver si está disponible.
+    Verifica si una tabla específica existe en PostgreSQL.
     """
     conn = connection or (checkpoint_saver.conn if checkpoint_saver else None)
     
     if conn is None:
         print("⚠️ No se puede verificar tabla: no hay conexión disponible")
         return False
+    
+    # Usar valores por defecto si no se especifican
+    table_name = table_name or DATASET_CONFIG["table_name"]
+    table_schema = table_schema or DATASET_CONFIG["table_schema"]
     
     try:
         with conn.cursor() as cursor:
@@ -601,14 +622,14 @@ def check_dataset_table_exists(connection=None):
                     WHERE table_schema = %s 
                     AND table_name = %s
                 )
-            """, (DATASET_CONFIG["table_schema"], DATASET_CONFIG["table_name"]))
+            """, (table_schema, table_name))
             
             exists = cursor.fetchone()[0]
-            print(f"🔍 Tabla '{DATASET_CONFIG['table_name']}' {'existe' if exists else 'no existe'} en BD")
+            print(f"🔍 Tabla '{table_name}' {'existe' if exists else 'no existe'} en BD")
             return exists
             
     except Exception as e:
-        print(f"⚠️ Error verificando tabla del dataset: {e}")
+        print(f"⚠️ Error verificando tabla {table_name}: {e}")
         return False
 
 def get_dataset_table_info(connection=None):
@@ -655,16 +676,19 @@ def get_dataset_table_info(connection=None):
         print(f"⚠️ Error obteniendo información de tabla: {e}")
         return None
 
-def create_dataset_table_from_df(df: pd.DataFrame, connection=None):
+def create_dataset_table_from_df(df: pd.DataFrame, connection=None, table_name=None, table_schema=None):
     """
-    Crea la tabla del dataset en PostgreSQL.
-    Acepta una conexión opcional o usa checkpoint_saver si está disponible.
+    Crea una tabla en PostgreSQL desde un DataFrame.
     """
     conn = connection or (checkpoint_saver.conn if checkpoint_saver else None)
     
     if conn is None:
         print("⚠️ No se puede crear tabla: no hay conexión disponible")
         return False, {}
+    
+    # Usar valores por defecto si no se especifican
+    table_name = table_name or DATASET_CONFIG["table_name"]
+    table_schema = table_schema or DATASET_CONFIG["table_schema"]
     
     try:
         postgres_types = get_postgres_data_types()
@@ -674,7 +698,7 @@ def create_dataset_table_from_df(df: pd.DataFrame, connection=None):
         clean_columns = [sanitize_column_name(col) for col in original_columns]
         column_mapping = dict(zip(original_columns, clean_columns))
         
-        print(f"📝 Creando tabla '{DATASET_CONFIG['table_name']}' con {len(df.columns)} columnas...")
+        print(f"📝 Creando tabla '{table_name}' con {len(df.columns)} columnas...")
         
         with conn.cursor() as cursor:
             # Construir DDL para crear tabla
@@ -706,7 +730,7 @@ def create_dataset_table_from_df(df: pd.DataFrame, connection=None):
             
             # Crear tabla
             create_table_sql = f"""
-                CREATE TABLE {DATASET_CONFIG["table_schema"]}.{DATASET_CONFIG["table_name"]} (
+                CREATE TABLE {table_schema}.{table_name} (
                     id SERIAL PRIMARY KEY,
                     {', '.join(column_definitions)},
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -716,19 +740,18 @@ def create_dataset_table_from_df(df: pd.DataFrame, connection=None):
             cursor.execute(create_table_sql)
             conn.commit()
             
-            print(f"✅ Tabla '{DATASET_CONFIG['table_name']}' creada exitosamente")
+            print(f"✅ Tabla '{table_name}' creada exitosamente")
             return True, column_mapping
             
     except Exception as e:
-        print(f"❌ Error creando tabla del dataset: {e}")
+        print(f"❌ Error creando tabla {table_name}: {e}")
         if conn:
             conn.rollback()
         return False, {}
 
-def insert_dataframe_to_table(df: pd.DataFrame, column_mapping: dict, connection=None):
+def insert_dataframe_to_table(df: pd.DataFrame, column_mapping: dict, connection=None, table_name=None, table_schema=None):
     """
     Inserta los datos del DataFrame en la tabla PostgreSQL.
-    Acepta una conexión opcional o usa checkpoint_saver si está disponible.
     """
     conn = connection or (checkpoint_saver.conn if checkpoint_saver else None)
     
@@ -736,11 +759,15 @@ def insert_dataframe_to_table(df: pd.DataFrame, column_mapping: dict, connection
         print("⚠️ No se puede insertar datos: no hay conexión disponible")
         return False
     
+    # Usar valores por defecto si no se especifican
+    table_name = table_name or DATASET_CONFIG["table_name"]
+    table_schema = table_schema or DATASET_CONFIG["table_schema"]
+    
     try:
         # Renombrar columnas según el mapeo
         df_clean = df.rename(columns=column_mapping)
         
-        print(f"📥 Insertando {len(df_clean)} filas en la tabla...")
+        print(f"📥 Insertando {len(df_clean)} filas en la tabla '{table_name}'...")
         
         # Preparar datos para inserción
         columns_list = list(column_mapping.values())
@@ -748,7 +775,7 @@ def insert_dataframe_to_table(df: pd.DataFrame, column_mapping: dict, connection
         columns_str = ', '.join([f'"{col}"' for col in columns_list])
         
         insert_sql = f"""
-            INSERT INTO {DATASET_CONFIG["table_schema"]}.{DATASET_CONFIG["table_name"]} 
+            INSERT INTO {table_schema}.{table_name} 
             ({columns_str}) VALUES ({placeholders})
         """
         
@@ -772,14 +799,14 @@ def insert_dataframe_to_table(df: pd.DataFrame, column_mapping: dict, connection
             conn.commit()
             
             # Verificar inserción
-            cursor.execute(f"SELECT COUNT(*) FROM {DATASET_CONFIG['table_schema']}.{DATASET_CONFIG['table_name']}")
+            cursor.execute(f"SELECT COUNT(*) FROM {table_schema}.{table_name}")
             inserted_count = cursor.fetchone()[0] - 1  # Restar 1 por el ID serial
             
-            print(f"✅ {inserted_count} filas insertadas correctamente")
+            print(f"✅ {inserted_count} filas insertadas correctamente en '{table_name}'")
             return True
             
     except Exception as e:
-        print(f"❌ Error insertando datos: {e}")
+        print(f"❌ Error insertando datos en {table_name}: {e}")
         if conn:
             conn.rollback()
         return False
