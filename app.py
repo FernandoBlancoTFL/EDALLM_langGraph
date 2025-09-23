@@ -1011,6 +1011,257 @@ def load_excel_to_postgres(connection=None, force_load=False):
         return None, False
 
 # ======================
+# FUNCIONES PARA GESTIÓN MÚLTIPLE DE DATASETS
+# ======================
+
+def get_all_available_datasets(connection=None):
+    """
+    Obtiene metadatos completos de todos los datasets disponibles (BD + archivos Excel).
+    Combina información de tablas en BD y archivos Excel disponibles.
+    """
+    conn = connection or (checkpoint_saver.conn if checkpoint_saver else None)
+    available_datasets = {}
+    
+    # 1. Obtener tablas de la BD
+    stored_tables = list_stored_tables(conn)
+    
+    for table_name in stored_tables:
+        table_info = get_dataset_table_info_by_name(table_name, conn)
+        if table_info:
+            # Buscar configuración correspondiente
+            dataset_config = None
+            for config in DATASETS_TO_PROCESS:
+                if config["table_name"] == table_name:
+                    dataset_config = config
+                    break
+            
+            available_datasets[table_name] = {
+                "source": "database",
+                "table_name": table_name,
+                "friendly_name": get_friendly_dataset_name(table_name),
+                "columns": table_info["columns"][:10],  # Primeras 10 columnas
+                "row_count": table_info["row_count"],
+                "main_columns": identify_key_columns(table_info["columns"]),
+                "description": generate_dataset_description(table_name, table_info["columns"]),
+                "excel_path": dataset_config["excel_path"] if dataset_config else None,
+                "keywords": generate_dataset_keywords(table_name, table_info["columns"])
+            }
+    
+    # 2. Agregar archivos Excel que no estén en BD
+    for config in DATASETS_TO_PROCESS:
+        table_name = config["table_name"]
+        if table_name not in available_datasets and os.path.exists(config["excel_path"]):
+            try:
+                # Leer solo las primeras filas para metadatos
+                df_sample = pd.read_excel(config["excel_path"], nrows=5)
+                available_datasets[table_name] = {
+                    "source": "excel_file",
+                    "table_name": table_name,
+                    "friendly_name": get_friendly_dataset_name(table_name),
+                    "columns": list(df_sample.columns)[:10],
+                    "row_count": "Estimado: " + str(len(df_sample) * 100),  # Estimación
+                    "main_columns": identify_key_columns(list(df_sample.columns)),
+                    "description": generate_dataset_description(table_name, list(df_sample.columns)),
+                    "excel_path": config["excel_path"],
+                    "keywords": generate_dataset_keywords(table_name, list(df_sample.columns))
+                }
+            except Exception as e:
+                print(f"⚠️ Error leyendo Excel {config['excel_path']}: {e}")
+    
+    return available_datasets
+
+def get_friendly_dataset_name(table_name):
+    """Convierte nombres de tabla a nombres amigables"""
+    name_mapping = {
+        "dataset_rides": "Dataset de Viajes NCR",
+        "crocodile_dataset": "Dataset de Cocodrilos",
+        "ncr_ride_bookings": "Reservas de Viajes NCR"
+    }
+    return name_mapping.get(table_name, table_name.replace("_", " ").title())
+
+def identify_key_columns(columns):
+    """Identifica las columnas más importantes basándose en nombres comunes"""
+    key_patterns = {
+        "id": ["id", "identifier", "key"],
+        "date": ["date", "time", "created", "updated", "timestamp"],
+        "location": ["location", "city", "address", "place", "destination"],
+        "amount": ["price", "cost", "amount", "value", "fare", "payment"],
+        "category": ["type", "category", "method", "status", "class"],
+        "user": ["user", "customer", "client", "passenger", "driver"]
+    }
+    
+    identified = []
+    for col in columns[:8]:  # Solo primeras 8 columnas
+        col_lower = col.lower()
+        for category, patterns in key_patterns.items():
+            if any(pattern in col_lower for pattern in patterns):
+                identified.append(f"{col} ({category})")
+                break
+        else:
+            identified.append(col)
+    
+    return identified[:5]  # Máximo 5 columnas clave
+
+def generate_dataset_description(table_name, columns):
+    """Genera una descripción inteligente del dataset"""
+    descriptions = {
+        "dataset_rides": "Contiene información de viajes y reservas de transporte, incluyendo fechas, ubicaciones, costos y métodos de pago",
+        "crocodile_dataset": "Dataset biológico con información sobre cocodrilos, posiblemente incluyendo medidas, ubicaciones y características",
+        "ncr_ride_bookings": "Sistema de reservas de viajes con detalles de pasajeros, rutas, precios y estados de booking"
+    }
+    
+    if table_name in descriptions:
+        return descriptions[table_name]
+    
+    # Generar descripción automática basada en columnas
+    col_hints = []
+    columns_lower = [c.lower() for c in columns]
+    
+    if any("date" in c or "time" in c for c in columns_lower):
+        col_hints.append("información temporal")
+    if any("price" in c or "cost" in c or "amount" in c for c in columns_lower):
+        col_hints.append("datos financieros")
+    if any("location" in c or "city" in c for c in columns_lower):
+        col_hints.append("datos geográficos")
+    if any("user" in c or "customer" in c for c in columns_lower):
+        col_hints.append("información de usuarios")
+    
+    if col_hints:
+        return f"Dataset que incluye {', '.join(col_hints)}"
+    else:
+        return f"Dataset con {len(columns)} columnas de datos"
+
+def generate_dataset_keywords(table_name, columns):
+    """Genera palabras clave para identificación automática"""
+    keywords = [table_name.replace("_", " ")]
+    
+    # Agregar keywords basados en nombre
+    if "ride" in table_name or "booking" in table_name:
+        keywords.extend(["viajes", "transporte", "reservas", "rides", "bookings"])
+    if "crocodile" in table_name:
+        keywords.extend(["cocodrilos", "animales", "biología", "crocodiles"])
+    
+    # Agregar keywords basados en columnas
+    col_keywords = []
+    for col in columns[:10]:
+        col_lower = col.lower()
+        if "payment" in col_lower:
+            col_keywords.extend(["pago", "payment"])
+        if "vehicle" in col_lower:
+            col_keywords.extend(["vehículo", "vehicle"])
+        if "date" in col_lower:
+            col_keywords.extend(["fecha", "date"])
+        if "location" in col_lower or "city" in col_lower:
+            col_keywords.extend(["ubicación", "location"])
+    
+    keywords.extend(list(set(col_keywords)))
+    return keywords
+
+def identify_dataset_from_query(query: str, available_datasets: dict) -> str:
+    """
+    Identifica qué dataset es más relevante basándose en la consulta del usuario.
+    Retorna el nombre de la tabla más apropiada.
+    """
+    query_lower = query.lower()
+    
+    # Búsqueda por referencias directas
+    for table_name, info in available_datasets.items():
+        # Buscar por nombre amigable
+        friendly_name = info["friendly_name"].lower()
+        if friendly_name in query_lower:
+            return table_name
+        
+        # Buscar por keywords
+        for keyword in info["keywords"]:
+            if keyword.lower() in query_lower:
+                return table_name
+    
+    # Búsqueda por patrones específicos
+    if any(word in query_lower for word in ["viaje", "ride", "booking", "reserva", "transporte"]):
+        for table_name in available_datasets:
+            if "ride" in table_name or "booking" in table_name:
+                return table_name
+    
+    if any(word in query_lower for word in ["cocodril", "animal", "biolog"]):
+        for table_name in available_datasets:
+            if "crocodile" in table_name:
+                return table_name
+    
+    # Búsqueda por números (archivo 1, dataset 1, etc.)
+    if "archivo 1" in query_lower or "dataset 1" in query_lower or "primer" in query_lower:
+        dataset_names = list(available_datasets.keys())
+        if dataset_names:
+            return dataset_names[0]  # Primer dataset
+    
+    if "archivo 2" in query_lower or "dataset 2" in query_lower or "segundo" in query_lower:
+        dataset_names = list(available_datasets.keys())
+        if len(dataset_names) > 1:
+            return dataset_names[1]  # Segundo dataset
+    
+    # Si no se encuentra coincidencia, retornar el primero disponible
+    if available_datasets:
+        return list(available_datasets.keys())[0]
+    
+    return None
+
+def load_specific_dataset(table_name: str, connection=None):
+    """
+    Carga un dataset específico en memoria.
+    Retorna (df, dataset_info, success)
+    """
+    global df, dataset_info, dataset_loaded  # MOVER ESTO AL INICIO
+    
+    # Buscar configuración del dataset
+    dataset_config = None
+    for config in DATASETS_TO_PROCESS:
+        if config["table_name"] == table_name:
+            dataset_config = config
+            break
+    
+    if not dataset_config:
+        print(f"❌ Configuración no encontrada para dataset: {table_name}")
+        return None, None, False
+    
+    conn = connection or (checkpoint_saver.conn if checkpoint_saver else None)
+    
+    # Intentar cargar desde BD primero
+    if check_dataset_table_exists(conn, table_name, dataset_config["table_schema"]):
+        print(f"🔄 Cargando {table_name} desde PostgreSQL...")
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(f"SELECT * FROM {dataset_config['table_schema']}.{table_name}")
+                rows = cursor.fetchall()
+                columns = [desc[0] for desc in cursor.description]
+                df = pd.DataFrame(rows, columns=columns)
+                
+                dataset_info = get_dataset_table_info_by_name(table_name, conn)
+                dataset_loaded = True
+                print(f"✅ Dataset {table_name} cargado desde BD: {df.shape}")
+                return df, dataset_info, True
+        except Exception as e:
+            print(f"❌ Error cargando desde BD: {e}")
+    
+    # Fallback: cargar desde Excel
+    if os.path.exists(dataset_config["excel_path"]):
+        print(f"📂 Cargando {table_name} desde Excel...")
+        try:
+            df = pd.read_excel(dataset_config["excel_path"])
+            dataset_info = {
+                "columns": list(df.columns),
+                "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
+                "row_count": len(df),
+                "table_name": table_name
+            }
+            dataset_loaded = True
+            print(f"✅ Dataset {table_name} cargado desde Excel: {df.shape}")
+            return df, dataset_info, True
+        except Exception as e:
+            print(f"❌ Error cargando desde Excel: {e}")
+    
+    print(f"❌ No se pudo cargar dataset: {table_name}")
+    return None, None, False
+
+# ======================
 # 1. Configuración inicial
 # ======================
 load_dotenv()
@@ -1459,6 +1710,11 @@ class AgentState(TypedDict):
     conversation_history: List[dict]  # Historial completo de consultas y respuestas
     session_start_time: str          # Timestamp de inicio de sesión
     total_queries: int               # Contador total acumulativo
+    # NUEVOS campos para gestión múltiple de datasets
+    available_datasets: dict         # Metadatos de todos los datasets disponibles
+    selected_dataset: str           # Dataset seleccionado para la consulta actual
+    active_dataframe: str           # DataFrame actualmente cargado en memoria
+    dataset_context: dict           # Contexto específico del dataset seleccionado
 
 # ======================
 # Función para gestionar historial conversacional
@@ -1489,13 +1745,75 @@ Estado: {'Éxito' if success else 'Error'}
 # 5. Nodos del grafo
 # ======================
 def node_clasificar(state: AgentState):
-    """El LLM decide qué acción tomar con contexto mejorado Y memoria conversacional"""
+    """El LLM decide qué dataset usar y qué acción tomar con contexto completo"""
+
+    global df, dataset_info, dataset_loaded
     
-    # Obtener información del DataFrame si no existe
-    if not state.get("df_info"):
-        # Limpiar sample para evitar valores NaN
-        sample_clean = df.head(2).fillna("NULL").to_dict()
+    # 1. OBTENER METADATOS DE TODOS LOS DATASETS DISPONIBLES
+    if not state.get("available_datasets"):
+        print("🔍 Obteniendo metadatos de datasets disponibles...")
+        state["available_datasets"] = get_all_available_datasets()
+        print(f"📊 Encontrados {len(state['available_datasets'])} datasets disponibles")
+    
+    available_datasets = state["available_datasets"]
+    
+    # 2. IDENTIFICAR DATASET MÁS APROPIADO PARA LA CONSULTA
+    if not state.get("selected_dataset"):
+        selected_dataset = identify_dataset_from_query(state["query"], available_datasets)
+        if selected_dataset:
+            state["selected_dataset"] = selected_dataset
+            state["dataset_context"] = available_datasets[selected_dataset]
+            print(f"🎯 Dataset identificado: {available_datasets[selected_dataset]['friendly_name']}")
+        else:
+            # Fallback al primer dataset disponible
+            if available_datasets:
+                first_dataset = list(available_datasets.keys())[0]
+                state["selected_dataset"] = first_dataset
+                state["dataset_context"] = available_datasets[first_dataset]
+                print(f"⚠️ No se pudo identificar dataset específico, usando: {available_datasets[first_dataset]['friendly_name']}")
+            else:
+                print("❌ No hay datasets disponibles")
+                state["selected_dataset"] = None
+    
+    # 3. CARGAR DATASET SI NO ESTÁ ACTIVO
+    selected_dataset = state["selected_dataset"]
+    if selected_dataset and state.get("active_dataframe") != selected_dataset:
+        print(f"🔄 Cargando dataset: {state['dataset_context']['friendly_name']}")
         
+        # Crear conexión temporal si es necesario
+        dataset_connection = checkpoint_saver.conn if checkpoint_saver else None
+        if dataset_connection is None:
+            try:
+                dataset_connection = psycopg.connect(connection_string)
+                temp_connection = True
+            except Exception as e:
+                print(f"❌ Error creando conexión: {e}")
+                dataset_connection = None
+                temp_connection = False
+        else:
+            temp_connection = False
+        
+        # Cargar el dataset específico
+        loaded_df, loaded_info, success = load_specific_dataset(selected_dataset, dataset_connection)
+        
+        if success:
+            # Actualizar variables globales
+            global df, dataset_info, dataset_loaded
+            df = loaded_df
+            dataset_info = loaded_info
+            dataset_loaded = True
+            state["active_dataframe"] = selected_dataset
+            print(f"✅ Dataset {state['dataset_context']['friendly_name']} cargado exitosamente")
+        else:
+            print(f"❌ Error cargando dataset {selected_dataset}")
+        
+        # Cerrar conexión temporal
+        if temp_connection and dataset_connection:
+            dataset_connection.close()
+    
+    # 4. OBTENER INFORMACIÓN DEL DATAFRAME ACTIVO
+    if not state.get("df_info") and df is not None:
+        sample_clean = df.head(2).fillna("NULL").to_dict()
         state["df_info"] = {
             "columns": list(df.columns),
             "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
@@ -1503,6 +1821,7 @@ def node_clasificar(state: AgentState):
             "sample": sample_clean
         }
     
+    # 5. PREPARAR CONTEXTOS PARA EL PROMPT
     # Contexto de iteraciones previas
     iteration_context = ""
     if state["iteration_count"] > 0:
@@ -1511,7 +1830,7 @@ def node_clasificar(state: AgentState):
             last_error = state["execution_history"][-1].get("error", "")
             iteration_context += f"\nÚltimo error: {last_error}"
 
-    # NUEVO: Contexto conversacional
+    # Contexto conversacional
     conversation_context = ""
     if state.get("conversation_history"):
         conversation_context = f"""
@@ -1522,44 +1841,127 @@ HISTORIAL DE CONVERSACIÓN PREVIA:
 IMPORTANTE: Tienes acceso al historial de consultas anteriores. Si el usuario hace referencia a preguntas previas ("la pregunta anterior", "lo que pregunté antes", etc.), usa este historial para responder.
 """
 
+    # Contexto de datasets disponibles
+    datasets_context = "\n\nDATASETS DISPONIBLES:\n"
+    for table_name, info in available_datasets.items():
+        status = "🟢 ACTIVO" if table_name == selected_dataset else "⚪ Disponible"
+        datasets_context += f"""
+{status} {info['friendly_name']} ({table_name}):
+  - Descripción: {info['description']}
+  - Columnas principales: {', '.join(info['main_columns'])}
+  - Filas: {info['row_count']}
+  - Keywords: {', '.join(info['keywords'][:5])}
+"""
+
+    # Contexto del dataset seleccionado
+    selected_context = ""
+    if selected_dataset and state.get("df_info"):
+        selected_context = f"""
+
+DATASET SELECCIONADO: {state['dataset_context']['friendly_name']}
+- Tabla: {selected_dataset}
+- Columnas disponibles: {state['df_info']['columns']}
+- Dimensiones: {state['df_info']['shape']}
+- Tipos de datos: {', '.join([f"{col}: {dtype}" for col, dtype in list(state['df_info']['dtypes'].items())[:8]])}
+"""
+
     tools_summary = get_tools_summary(tools)
 
+    # 6. PROMPT PRINCIPAL CON CONTEXTO COMPLETO
     prompt = f"""
-Eres un asistente de análisis de datos experto con memoria conversacional. Analiza esta consulta y decide la mejor acción.
+Eres un asistente de análisis de datos experto con acceso a múltiples datasets. Analiza esta consulta y toma dos decisiones importantes:
+
+1. VERIFICAR DATASET: ¿El dataset seleccionado es el correcto para esta consulta?
+2. SELECCIONAR HERRAMIENTA: ¿Qué herramienta usar para el análisis?
 
 CONSULTA ACTUAL: {state['query']}
-DATAFRAME INFO: Columnas = {state['df_info']['columns']}, Shape = {state['df_info']['shape']}
+{datasets_context}
+{selected_context}
 {iteration_context}
 {conversation_context}
 
 HERRAMIENTAS DISPONIBLES:
 {tools_summary}
 
-DECISIÓN:
-Analiza la consulta actual considerando el historial previo si es relevante. 
-Selecciona la herramienta más adecuada. 
-Si ninguna herramienta especializada es suficiente, usa Python_Interpreter.
+INSTRUCCIONES:
+- Si el usuario menciona un dataset específico (por nombre, número, o características), verifica que el dataset seleccionado sea correcto
+- Si necesitas cambiar de dataset, menciona cuál sería mejor
+- Selecciona la herramienta más adecuada para el análisis solicitado
+- Si ninguna herramienta especializada es suficiente, usa Python_Interpreter
 
 Formato de salida:
-Thought: <análisis detallado de la consulta y estrategia, considerando historial si aplica>
+Thought: <análisis de la consulta, verificación del dataset correcto, y estrategia de herramientas>
 Action: <nombre exacto de la herramienta elegida>
+Dataset: <confirmar el dataset actual o sugerir uno diferente si es necesario>
 """
 
     response = llm.invoke(prompt).content.strip()
 
-    # Extraer thought y action
-    thought, action = "", "Python_Interpreter"
+    # 7. EXTRAER DECISIONES DEL LLM
+    thought, action, dataset_suggestion = "", "Python_Interpreter", selected_dataset
+    
     for line in response.splitlines():
         if line.lower().startswith("thought:"):
             thought = line.split(":", 1)[1].strip()
         elif line.lower().startswith("action:"):
             action = line.split(":", 1)[1].strip()
+        elif line.lower().startswith("dataset:"):
+            dataset_part = line.split(":", 1)[1].strip()
+            # Buscar si sugiere un dataset diferente
+            for table_name in available_datasets.keys():
+                if table_name in dataset_part or available_datasets[table_name]["friendly_name"].lower() in dataset_part.lower():
+                    if table_name != selected_dataset:
+                        dataset_suggestion = table_name
+                        print(f"💡 LLM sugiere cambio a: {available_datasets[table_name]['friendly_name']}")
+                    break
 
+    # 8. CAMBIAR DATASET SI ES NECESARIO
+    if dataset_suggestion and dataset_suggestion != selected_dataset:
+        print(f"🔄 Cambiando dataset de {available_datasets[selected_dataset]['friendly_name']} a {available_datasets[dataset_suggestion]['friendly_name']}")
+        
+        # Cargar nuevo dataset
+        dataset_connection = checkpoint_saver.conn if checkpoint_saver else None
+        if dataset_connection is None:
+            try:
+                dataset_connection = psycopg.connect(connection_string)
+                temp_connection = True
+            except:
+                dataset_connection = None
+                temp_connection = False
+        else:
+            temp_connection = False
+        
+        loaded_df, loaded_info, success = load_specific_dataset(dataset_suggestion, dataset_connection)
+        
+        if success:
+            # global df, dataset_info, dataset_loaded
+            df = loaded_df
+            dataset_info = loaded_info
+            dataset_loaded = True
+            state["selected_dataset"] = dataset_suggestion
+            state["dataset_context"] = available_datasets[dataset_suggestion]
+            state["active_dataframe"] = dataset_suggestion
+            
+            # Actualizar df_info con nuevo dataset
+            sample_clean = df.head(2).fillna("NULL").to_dict()
+            state["df_info"] = {
+                "columns": list(df.columns),
+                "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
+                "shape": df.shape,
+                "sample": sample_clean
+            }
+            print(f"✅ Cambio de dataset completado")
+        
+        if temp_connection and dataset_connection:
+            dataset_connection.close()
+
+    # 9. ACTUALIZAR ESTADO
     state["thought"] = thought
     state["action"] = action
-    state["history"].append(f"Iteración {state['iteration_count']} - Clasificar → {thought[:100]}...")
+    state["history"].append(f"Iteración {state['iteration_count']} - Dataset: {state['dataset_context']['friendly_name']} - Clasificar → {thought[:100]}...")
 
-    print(f"\n🧠 Iteración {state['iteration_count']} - Thought: {thought}")
+    print(f"\n🧠 Iteración {state['iteration_count']} - Dataset: {state['dataset_context']['friendly_name']}")
+    print(f"🧠 Thought: {thought}")
     print(f"➡️ Action: {action}")
 
     return state
@@ -1846,7 +2248,12 @@ def main():
                 # Cargar historial existente
                 "conversation_history": previous_context.get("conversation_history", []),
                 "session_start_time": previous_context.get("session_start_time", str(pd.Timestamp.now())),
-                "total_queries": previous_context.get("total_queries", 0)
+                "total_queries": previous_context.get("total_queries", 0),
+                # NUEVOS campos para gestión múltiple de datasets
+                "available_datasets": {},
+                "selected_dataset": None,
+                "active_dataframe": None,
+                "dataset_context": {}
             }
         else:
             # Nuevo estado inicial solo si NO hay contexto previo
@@ -1867,7 +2274,12 @@ def main():
                 # Nuevo historial
                 "conversation_history": [],
                 "session_start_time": str(pd.Timestamp.now()),
-                "total_queries": 0
+                "total_queries": 0,
+                # NUEVOS campos para gestión múltiple de datasets
+                "available_datasets": {},
+                "selected_dataset": None,
+                "active_dataframe": None,
+                "dataset_context": {}
             }
 
         # Configuración para el checkpointer con thread fijo
