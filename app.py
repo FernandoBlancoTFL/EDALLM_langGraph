@@ -1715,6 +1715,16 @@ class AgentState(TypedDict):
     selected_dataset: str           # Dataset seleccionado para la consulta actual
     active_dataframe: str           # DataFrame actualmente cargado en memoria
     dataset_context: dict           # Contexto específico del dataset seleccionado
+    # NUEVOS campos para que el LLM use consultas SQL
+    data_strategy: str               # "sql" o "dataframe"
+    sql_feasible: bool              # Si SQL puede resolver la consulta
+    table_metadata: dict            # Metadatos cacheados sin cargar datos
+    strategy_history: List[str]     # Historial de cambios de estrategia
+    sql_results: Any                # Resultados de consultas SQL
+    strategy_switched: bool         # Si se cambió de estrategia (para logs)
+    needs_fallback: bool           # Si necesita fallback a DataFrame
+    strategy_reason: str           # Razón de la estrategia elegida
+    sql_error: Optional[str]       # Error específico de SQL si ocurre
 
 # ======================
 # Función para gestionar historial conversacional
@@ -1744,92 +1754,97 @@ Estado: {'Éxito' if success else 'Error'}
 # ======================
 # 5. Nodos del grafo
 # ======================
-def node_clasificar(state: AgentState):
-    """El LLM decide qué dataset usar y qué acción tomar con contexto completo"""
-
-    global df, dataset_info, dataset_loaded
+def nodo_estrategia_datos(state: AgentState):
+    """NUEVO: Decide si usar SQL o DataFrame basándose en la consulta"""
     
-    # 1. OBTENER METADATOS DE TODOS LOS DATASETS DISPONIBLES
+    print("🔍 Analizando estrategia de acceso a datos...")
+    
+    # Obtener metadatos de tablas disponibles sin cargar datos
     if not state.get("available_datasets"):
-        print("🔍 Obteniendo metadatos de datasets disponibles...")
         state["available_datasets"] = get_all_available_datasets()
-        print(f"📊 Encontrados {len(state['available_datasets'])} datasets disponibles")
     
-    available_datasets = state["available_datasets"]
-    
-    # 2. IDENTIFICAR DATASET MÁS APROPIADO PARA LA CONSULTA
+    # Identificar dataset apropiado
     if not state.get("selected_dataset"):
-        selected_dataset = identify_dataset_from_query(state["query"], available_datasets)
+        selected_dataset = identify_dataset_from_query(state["query"], state["available_datasets"])
         if selected_dataset:
             state["selected_dataset"] = selected_dataset
-            state["dataset_context"] = available_datasets[selected_dataset]
-            print(f"🎯 Dataset identificado: {available_datasets[selected_dataset]['friendly_name']}")
-        else:
-            # Fallback al primer dataset disponible
-            if available_datasets:
-                first_dataset = list(available_datasets.keys())[0]
-                state["selected_dataset"] = first_dataset
-                state["dataset_context"] = available_datasets[first_dataset]
-                print(f"⚠️ No se pudo identificar dataset específico, usando: {available_datasets[first_dataset]['friendly_name']}")
-            else:
-                print("❌ No hay datasets disponibles")
-                state["selected_dataset"] = None
+            state["dataset_context"] = state["available_datasets"][selected_dataset]
     
-    # 3. CARGAR DATASET SI NO ESTÁ ACTIVO
-    selected_dataset = state["selected_dataset"]
-    if selected_dataset and state.get("active_dataframe") != selected_dataset:
-        print(f"🔄 Cargando dataset: {state['dataset_context']['friendly_name']}")
-        
-        # Crear conexión temporal si es necesario
-        dataset_connection = checkpoint_saver.conn if checkpoint_saver else None
-        if dataset_connection is None:
-            try:
-                dataset_connection = psycopg.connect(connection_string)
-                temp_connection = True
-            except Exception as e:
-                print(f"❌ Error creando conexión: {e}")
-                dataset_connection = None
-                temp_connection = False
-        else:
-            temp_connection = False
-        
-        # Cargar el dataset específico
-        loaded_df, loaded_info, success = load_specific_dataset(selected_dataset, dataset_connection)
-        
-        if success:
-            # Actualizar variables globales
-            global df, dataset_info, dataset_loaded
-            df = loaded_df
-            dataset_info = loaded_info
-            dataset_loaded = True
-            state["active_dataframe"] = selected_dataset
-            print(f"✅ Dataset {state['dataset_context']['friendly_name']} cargado exitosamente")
-        else:
-            print(f"❌ Error cargando dataset {selected_dataset}")
-        
-        # Cerrar conexión temporal
-        if temp_connection and dataset_connection:
-            dataset_connection.close()
+    # Obtener metadatos de la tabla sin cargar el DataFrame completo
+    table_metadata = get_table_metadata_light(state["selected_dataset"])
+    state["table_metadata"] = table_metadata
     
-    # 4. OBTENER INFORMACIÓN DEL DATAFRAME ACTIVO
-    if not state.get("df_info") and df is not None:
-        sample_clean = df.head(2).fillna("NULL").to_dict()
-        state["df_info"] = {
-            "columns": list(df.columns),
-            "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
-            "shape": df.shape,
-            "sample": sample_clean
-        }
-    
-    # 5. PREPARAR CONTEXTOS PARA EL PROMPT
-    # Contexto de iteraciones previas
-    iteration_context = ""
-    if state["iteration_count"] > 0:
-        iteration_context = f"\nEsta es la iteración #{state['iteration_count'] + 1}. Intentos previos han fallado."
-        if state["execution_history"]:
-            last_error = state["execution_history"][-1].get("error", "")
-            iteration_context += f"\nÚltimo error: {last_error}"
+    # Analizar consulta para determinar estrategia
+    strategy_prompt = f"""
+Analiza esta consulta y determina la mejor estrategia de acceso a datos:
 
+CONSULTA: {state['query']}
+
+METADATOS DE TABLA DISPONIBLE:
+- Tabla: {state['selected_dataset']}
+- Columnas: {table_metadata.get('columns', [])[:10]}
+- Filas estimadas: {table_metadata.get('row_count', 'N/A')}
+
+CRITERIOS PARA SQL:
+- Consultas de conteo simple ("¿cuántos registros hay?")
+- Filtros básicos ("mostrar datos de enero")
+- Agregaciones simples (suma, promedio, máximo, mínimo)
+- Consultas de metadatos (columnas, tipos)
+- Exploración inicial de datos
+- Top N registros o muestras
+
+CRITERIOS PARA DATAFRAME:
+- Análisis estadísticos complejos
+- Visualizaciones y gráficos
+- Correlaciones y análisis avanzados
+- Transformaciones complejas
+- Machine learning
+- Operaciones que requieren pandas específicamente
+
+Responde:
+Strategy: sql|dataframe
+Reason: <breve explicación del por qué>
+SQL_Feasible: true|false
+"""
+    
+    response = llm.invoke(strategy_prompt).content.strip()
+    
+    # Extraer decisión
+    strategy = "dataframe"  # default
+    sql_feasible = False
+    reason = ""
+    
+    for line in response.splitlines():
+        if line.lower().startswith("strategy:"):
+            strategy = line.split(":", 1)[1].strip().lower()
+        elif line.lower().startswith("sql_feasible:"):
+            sql_feasible = "true" in line.split(":", 1)[1].strip().lower()
+        elif line.lower().startswith("reason:"):
+            reason = line.split(":", 1)[1].strip()
+    
+    # Actualizar estado
+    state["data_strategy"] = strategy
+    state["sql_feasible"] = sql_feasible
+    state["strategy_reason"] = reason
+    
+    print(f"📊 Estrategia seleccionada: {strategy.upper()}")
+    print(f"🔍 Razón: {reason}")
+    print(f"🗃️ SQL factible: {sql_feasible}")
+    
+    state["history"].append(f"Estrategia → {strategy.upper()} - {reason}")
+    
+    return state
+
+def node_clasificar_modificado(state: AgentState):
+    """MODIFICADO: Se enfoca solo en dataset selection y tool selection"""
+    
+    # La estrategia ya fue definida por nodo_estrategia_datos
+    data_strategy = state.get("data_strategy", "dataframe")
+    selected_dataset = state.get("selected_dataset")
+    
+    print(f"🎯 Clasificando con estrategia: {data_strategy.upper()}")
+    print(f"📊 Dataset seleccionado: {state.get('dataset_context', {}).get('friendly_name', 'N/A')}")
+    
     # Contexto conversacional
     conversation_context = ""
     if state.get("conversation_history"):
@@ -1837,133 +1852,162 @@ def node_clasificar(state: AgentState):
 
 HISTORIAL DE CONVERSACIÓN PREVIA:
 {format_conversation_context(state["conversation_history"])}
-
-IMPORTANTE: Tienes acceso al historial de consultas anteriores. Si el usuario hace referencia a preguntas previas ("la pregunta anterior", "lo que pregunté antes", etc.), usa este historial para responder.
 """
 
-    # Contexto de datasets disponibles
-    datasets_context = "\n\nDATASETS DISPONIBLES:\n"
-    for table_name, info in available_datasets.items():
-        status = "🟢 ACTIVO" if table_name == selected_dataset else "⚪ Disponible"
-        datasets_context += f"""
-{status} {info['friendly_name']} ({table_name}):
-  - Descripción: {info['description']}
-  - Columnas principales: {', '.join(info['main_columns'])}
-  - Filas: {info['row_count']}
-  - Keywords: {', '.join(info['keywords'][:5])}
+    # Seleccionar herramientas según estrategia
+    if data_strategy == "sql":
+        tools_context = """
+HERRAMIENTAS DISPONIBLES (Modo SQL):
+- SQL_Executor: Ejecuta consultas SQL directas en la base de datos
+- Herramientas básicas de metadatos si SQL no es suficiente
 """
-
-    # Contexto del dataset seleccionado
-    selected_context = ""
-    if selected_dataset and state.get("df_info"):
-        selected_context = f"""
-
-DATASET SELECCIONADO: {state['dataset_context']['friendly_name']}
-- Tabla: {selected_dataset}
-- Columnas disponibles: {state['df_info']['columns']}
-- Dimensiones: {state['df_info']['shape']}
-- Tipos de datos: {', '.join([f"{col}: {dtype}" for col, dtype in list(state['df_info']['dtypes'].items())[:8]])}
+        recommended_action = "SQL_Executor"
+    else:
+        tools_context = f"""
+HERRAMIENTAS DISPONIBLES (Modo DataFrame):
+{get_tools_summary(tools)}
 """
-
-    tools_summary = get_tools_summary(tools)
-
-    # 6. PROMPT PRINCIPAL CON CONTEXTO COMPLETO
+        recommended_action = "Python_Interpreter"
+    
     prompt = f"""
-Eres un asistente de análisis de datos experto con acceso a múltiples datasets. Analiza esta consulta y toma dos decisiones importantes:
+Analiza esta consulta para seleccionar la herramienta más apropiada:
 
-1. VERIFICAR DATASET: ¿El dataset seleccionado es el correcto para esta consulta?
-2. SELECCIONAR HERRAMIENTA: ¿Qué herramienta usar para el análisis?
-
-CONSULTA ACTUAL: {state['query']}
-{datasets_context}
-{selected_context}
-{iteration_context}
+CONSULTA: {state['query']}
+ESTRATEGIA DEFINIDA: {data_strategy.upper()}
+DATASET: {state.get('dataset_context', {}).get('friendly_name', 'N/A')}
 {conversation_context}
 
-HERRAMIENTAS DISPONIBLES:
-{tools_summary}
+{tools_context}
 
 INSTRUCCIONES:
-- Si el usuario menciona un dataset específico (por nombre, número, o características), verifica que el dataset seleccionado sea correcto
-- Si necesitas cambiar de dataset, menciona cuál sería mejor
-- Selecciona la herramienta más adecuada para el análisis solicitado
-- Si ninguna herramienta especializada es suficiente, usa Python_Interpreter
+- La estrategia de datos ya fue decidida por el nodo anterior
+- Selecciona la herramienta MÁS específica para esta consulta
+- Si la estrategia es SQL, prioriza SQL_Executor salvo que sea inadecuado
+- Si la estrategia es DataFrame, usa las herramientas especializadas o Python_Interpreter
 
-Formato de salida:
-Thought: <análisis de la consulta, verificación del dataset correcto, y estrategia de herramientas>
-Action: <nombre exacto de la herramienta elegida>
-Dataset: <confirmar el dataset actual o sugerir uno diferente si es necesario>
+Responde:
+Thought: <análisis de la consulta y selección de herramienta>
+Action: <nombre exacto de la herramienta>
 """
 
     response = llm.invoke(prompt).content.strip()
-
-    # 7. EXTRAER DECISIONES DEL LLM
-    thought, action, dataset_suggestion = "", "Python_Interpreter", selected_dataset
+    
+    # Extraer decisiones
+    thought, action = "", recommended_action
     
     for line in response.splitlines():
         if line.lower().startswith("thought:"):
             thought = line.split(":", 1)[1].strip()
         elif line.lower().startswith("action:"):
             action = line.split(":", 1)[1].strip()
-        elif line.lower().startswith("dataset:"):
-            dataset_part = line.split(":", 1)[1].strip()
-            # Buscar si sugiere un dataset diferente
-            for table_name in available_datasets.keys():
-                if table_name in dataset_part or available_datasets[table_name]["friendly_name"].lower() in dataset_part.lower():
-                    if table_name != selected_dataset:
-                        dataset_suggestion = table_name
-                        print(f"💡 LLM sugiere cambio a: {available_datasets[table_name]['friendly_name']}")
-                    break
-
-    # 8. CAMBIAR DATASET SI ES NECESARIO
-    if dataset_suggestion and dataset_suggestion != selected_dataset:
-        print(f"🔄 Cambiando dataset de {available_datasets[selected_dataset]['friendly_name']} a {available_datasets[dataset_suggestion]['friendly_name']}")
-        
-        # Cargar nuevo dataset
-        dataset_connection = checkpoint_saver.conn if checkpoint_saver else None
-        if dataset_connection is None:
-            try:
-                dataset_connection = psycopg.connect(connection_string)
-                temp_connection = True
-            except:
-                dataset_connection = None
-                temp_connection = False
-        else:
-            temp_connection = False
-        
-        loaded_df, loaded_info, success = load_specific_dataset(dataset_suggestion, dataset_connection)
-        
-        if success:
-            # global df, dataset_info, dataset_loaded
-            df = loaded_df
-            dataset_info = loaded_info
-            dataset_loaded = True
-            state["selected_dataset"] = dataset_suggestion
-            state["dataset_context"] = available_datasets[dataset_suggestion]
-            state["active_dataframe"] = dataset_suggestion
-            
-            # Actualizar df_info con nuevo dataset
-            sample_clean = df.head(2).fillna("NULL").to_dict()
-            state["df_info"] = {
-                "columns": list(df.columns),
-                "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
-                "shape": df.shape,
-                "sample": sample_clean
-            }
-            print(f"✅ Cambio de dataset completado")
-        
-        if temp_connection and dataset_connection:
-            dataset_connection.close()
-
-    # 9. ACTUALIZAR ESTADO
+    
     state["thought"] = thought
     state["action"] = action
-    state["history"].append(f"Iteración {state['iteration_count']} - Dataset: {state['dataset_context']['friendly_name']} - Clasificar → {thought[:100]}...")
-
-    print(f"\n🧠 Iteración {state['iteration_count']} - Dataset: {state['dataset_context']['friendly_name']}")
+    
     print(f"🧠 Thought: {thought}")
     print(f"➡️ Action: {action}")
+    
+    state["history"].append(f"Clasificar (Mod) → {action} - {thought[:100]}")
+    
+    return state
 
+def nodo_sql_executor(state: AgentState):
+    """NUEVO: Ejecuta consultas SQL directamente en la base de datos"""
+    
+    print("🗃️ Ejecutando consulta SQL...")
+    
+    # Obtener conexión
+    conn = checkpoint_saver.conn if checkpoint_saver else None
+    if conn is None:
+        # Fallback: crear conexión temporal
+        try:
+            db_config = load_db_config()
+            connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+            conn = psycopg.connect(connection_string)
+            temp_connection = True
+        except Exception as e:
+            print(f"❌ Error creando conexión SQL: {e}")
+            state["sql_error"] = str(e)
+            state["success"] = False
+            return state
+    else:
+        temp_connection = False
+    
+    # Generar consulta SQL
+    sql_prompt = f"""
+Genera una consulta SQL para resolver esta petición:
+
+CONSULTA: {state['query']}
+
+INFORMACIÓN DE TABLA:
+- Tabla: {state['selected_dataset']}
+- Esquema: public
+- Columnas disponibles: {state.get('table_metadata', {}).get('columns', [])}
+
+REGLAS:
+1. Usa SOLO la tabla: public.{state['selected_dataset']}
+2. Usa comillas dobles para nombres de columnas si tienen espacios
+3. Limita resultados a máximo 100 filas si no se especifica
+4. Para agregaciones, usa funciones SQL estándar (COUNT, SUM, AVG, etc.)
+5. Si hay fechas, asume formato TIMESTAMP
+6. NO uses funciones específicas de PostgreSQL complejas
+
+EJEMPLOS:
+- Conteo: SELECT COUNT(*) FROM public.{state['selected_dataset']}
+- Top 10: SELECT * FROM public.{state['selected_dataset']} LIMIT 10
+- Agregación: SELECT "Payment Method", COUNT(*) FROM public.{state['selected_dataset']} GROUP BY "Payment Method"
+
+Responde SOLO con la consulta SQL, sin explicaciones:
+"""
+    
+    try:
+        sql_query = llm.invoke(sql_prompt).content.strip()
+        
+        # Limpiar la consulta
+        if sql_query.startswith("```"):
+            sql_query = sql_query.strip("`").replace("sql", "").strip()
+        
+        print(f"🔍 SQL generado:\n{sql_query}")
+        
+        # Ejecutar consulta
+        with conn.cursor() as cursor:
+            cursor.execute(sql_query)
+            
+            # Obtener resultados
+            if cursor.description:  # Si hay resultados
+                columns = [desc[0] for desc in cursor.description]
+                rows = cursor.fetchall()
+                
+                # Convertir a DataFrame para compatibilidad
+                if rows:
+                    result_df = pd.DataFrame(rows, columns=columns)
+                    state["sql_results"] = result_df
+                    state["result"] = f"Consulta SQL ejecutada exitosamente. Resultados:\n{result_df}"
+                else:
+                    state["sql_results"] = pd.DataFrame()
+                    state["result"] = "Consulta SQL ejecutada exitosamente. Sin resultados."
+            else:
+                # Consulta sin resultados (INSERT, UPDATE, etc.)
+                rowcount = cursor.rowcount
+                state["result"] = f"Consulta SQL ejecutada. Filas afectadas: {rowcount}"
+        
+        state["success"] = True
+        print(f"✅ SQL ejecutado exitosamente")
+        
+    except Exception as e:
+        print(f"❌ Error ejecutando SQL: {e}")
+        state["sql_error"] = str(e)
+        state["success"] = False
+        state["result"] = None
+        
+        # Marcar para fallback a DataFrame
+        state["needs_fallback"] = True
+        
+    finally:
+        if temp_connection and conn:
+            conn.close()
+    
+    state["history"].append(f"SQL Executor → {'Éxito' if state.get('success', False) else 'Error'}")
     return state
 
 def node_ejecutar_python(state: AgentState):
@@ -2018,29 +2062,44 @@ def node_ejecutar_python(state: AgentState):
     
     return state
 
-def node_validar_y_decidir(state: AgentState):
-    """Valida el resultado y decide si continuar iterando"""
+def node_validar_y_decidir_modificado(state: AgentState):
+    """MODIFICADO: Maneja fallbacks entre SQL y DataFrame"""
     
     state["iteration_count"] += 1
     success = state.get("success", False)
     max_iterations = state.get("max_iterations", 3)
+    needs_fallback = state.get("needs_fallback", False)
+    current_strategy = state.get("data_strategy", "dataframe")
     
     print(f"\n🔍 Validación - Iteración {state['iteration_count']}")
     print(f"   Éxito: {success}")
-    print(f"   Iteraciones restantes: {max_iterations - state['iteration_count']}")
+    print(f"   Estrategia actual: {current_strategy.upper()}")
+    print(f"   Necesita fallback: {needs_fallback}")
     
     # Decidir próxima acción
     if success:
         state["next_node"] = "responder"
         print("   ➡️ Decisión: Proceder a responder (éxito)")
+        
+    elif needs_fallback and current_strategy == "sql":
+        # Cambiar estrategia de SQL a DataFrame
+        state["data_strategy"] = "dataframe"
+        state["needs_fallback"] = False
+        state["strategy_switched"] = True
+        state["next_node"] = "clasificar"
+        print("   ➡️ Decisión: Fallback a DataFrame")
+        
     elif state["iteration_count"] >= max_iterations:
         state["next_node"] = "responder"
-        print("   ➡️ Decisión: Proceder a responder (máximo de iteraciones alcanzado)")
+        print("   ➡️ Decisión: Proceder a responder (máximo iteraciones)")
+        
     else:
         state["next_node"] = "clasificar"
         print("   ➡️ Decisión: Nueva iteración")
     
-    state["history"].append(f"Validar → Iteración {state['iteration_count']}, Éxito: {success}, Próximo: {state['next_node']}")
+    # Actualizar historial con información de fallback
+    fallback_info = " (con fallback)" if needs_fallback else ""
+    state["history"].append(f"Validar (Mod) → Iter {state['iteration_count']}, {current_strategy.upper()}{fallback_info}, Siguiente: {state['next_node']}")
     
     return state
 
@@ -2122,62 +2181,138 @@ Genera una respuesta empática en español explicando:
     
     return state
 
-def route_after_validation(state: AgentState):
-    """Determina la siguiente ruta basada en la validación"""
+def route_after_classification(state: AgentState):
+    """Determina si ir a SQL_Executor o Python_Interpreter"""
+    action = state.get("action", "Python_Interpreter")
+    data_strategy = state.get("data_strategy", "dataframe")
+    
+    print(f"\n🔧 Routing después de clasificación:")
+    print(f"   Action: {action}")
+    print(f"   Strategy: {data_strategy}")
+    
+    # Mapeo de acciones a nodos
+    if action == "SQL_Executor" or (data_strategy == "sql" and action not in ["Python_Interpreter"]):
+        print("   → Routing to: sql_executor")
+        return "sql_executor"
+    else:
+        print("   → Routing to: ejecutar_python")
+        return "ejecutar_python"
+
+def route_after_validation_modificado(state: AgentState):
+    """Routing modificado que maneja fallbacks"""
     success = state.get("success", False)
     iteration_count = state.get("iteration_count", 0)
     max_iterations = state.get("max_iterations", 3)
+    needs_fallback = state.get("needs_fallback", False)
+    current_strategy = state.get("data_strategy", "dataframe")
     
-    print(f"\n🔧 DEBUG route_after_validation:")
+    print(f"\n🔧 DEBUG route_after_validation_modificado:")
     print(f"   Success: {success}")
     print(f"   Iteration: {iteration_count}")
-    print(f"   Max iterations: {max_iterations}")
-    print(f"   Next node from state: {state.get('next_node', 'N/A')}")
+    print(f"   Strategy: {current_strategy}")
+    print(f"   Needs fallback: {needs_fallback}")
     
     if success:
         print("   → Routing to: responder (success)")
         return "responder"
+    elif needs_fallback and current_strategy == "sql":
+        print("   → Routing to: estrategia_datos (fallback)")
+        return "estrategia_datos"  # Volver a evaluar estrategia
     elif iteration_count >= max_iterations:
-        print("   → Routing to: responder (max iterations reached)")
+        print("   → Routing to: responder (max iterations)")
         return "responder"
     else:
-        print("   → Routing to: clasificar (continue iteration)")
+        print("   → Routing to: clasificar (continue)")
         return "clasificar"
+
+def get_table_metadata_light(table_name: str):
+    """Obtiene metadatos básicos de una tabla sin cargar datos"""
+    
+    conn = checkpoint_saver.conn if checkpoint_saver else None
+    if conn is None:
+        try:
+            db_config = load_db_config()
+            connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+            conn = psycopg.connect(connection_string)
+            temp_connection = True
+        except:
+            return {}
+    else:
+        temp_connection = False
+    
+    try:
+        with conn.cursor() as cursor:
+            # Información de columnas
+            cursor.execute("""
+                SELECT column_name, data_type, is_nullable
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = %s
+                ORDER BY ordinal_position
+            """, (table_name,))
+            
+            columns_info = cursor.fetchall()
+            
+            # Conteo de filas
+            cursor.execute(f'SELECT COUNT(*) FROM public."{table_name}"')
+            row_count = cursor.fetchone()[0]
+            
+            return {
+                "columns": [col[0] for col in columns_info],
+                "dtypes": {col[0]: col[1] for col in columns_info},
+                "row_count": row_count,
+                "nullable": {col[0]: col[2] == 'YES' for col in columns_info}
+            }
+            
+    except Exception as e:
+        print(f"⚠️ Error obteniendo metadatos de {table_name}: {e}")
+        return {}
+    finally:
+        if temp_connection and conn:
+            conn.close()
 
 # ======================
 # 6. Construir el grafo
 # ======================
-def create_graph():
+def create_graph_with_sql():
+    """Crea el grafo con los nuevos nodos SQL"""
     graph = StateGraph(AgentState)
 
-    # Nodos
-    graph.add_node("clasificar", node_clasificar)
-    graph.add_node("ejecutar_python", node_ejecutar_python)
-    graph.add_node("validar", node_validar_y_decidir)
-    graph.add_node("responder", node_responder)
+    # Nodos existentes + nuevos
+    graph.add_node("estrategia_datos", nodo_estrategia_datos)  # NUEVO
+    graph.add_node("clasificar", node_clasificar_modificado)   # MODIFICADO
+    graph.add_node("sql_executor", nodo_sql_executor)          # NUEVO
+    graph.add_node("ejecutar_python", node_ejecutar_python)    # EXISTENTE
+    graph.add_node("validar", node_validar_y_decidir_modificado) # MODIFICADO
+    graph.add_node("responder", node_responder)                # EXISTENTE
 
-    # Punto de entrada
-    graph.set_entry_point("clasificar")
+    # Nuevo punto de entrada
+    graph.set_entry_point("estrategia_datos")
 
-    # Flujo principal
-    graph.add_edge("clasificar", "ejecutar_python")
+    # Flujo principal modificado
+    graph.add_edge("estrategia_datos", "clasificar")
+    
+    # Routing condicional desde clasificación
+    graph.add_conditional_edges("clasificar", route_after_classification)
+    
+    # Ambos ejecutores van a validación
+    graph.add_edge("sql_executor", "validar")
     graph.add_edge("ejecutar_python", "validar")
     
-    # Enrutamiento condicional desde validación
-    graph.add_conditional_edges("validar", route_after_validation)
+    # Routing condicional desde validación (con fallbacks)
+    graph.add_conditional_edges("validar", route_after_validation_modificado)
     
     # Fin del grafo
     graph.add_edge("responder", END)
 
-    # Compilar con o sin checkpointer según esté disponible
+    # Compilar con checkpointer si está disponible
     if checkpoint_saver is not None:
         return graph.compile(checkpointer=checkpoint_saver)
     else:
-        print("⚠️ Compilando grafo sin checkpoints")
+        print("⚠️ Compilando grafo con SQL sin checkpoints")
         return graph.compile()
 
 def main():
-    app = create_graph()
+    app = create_graph_with_sql()
     
     print("✅ Base de datos PostgreSQL configurada correctamente")
     print("✅ Sistema de checkpoints activado")
