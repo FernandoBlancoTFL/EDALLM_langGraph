@@ -12,11 +12,8 @@ from dotenv import load_dotenv
 from langgraph.graph import StateGraph, END
 from typing import TypedDict, List, Any
 import sys
-
 import psycopg
 from psycopg import sql
-from langgraph.checkpoint.postgres import PostgresSaver
-import uuid
 import json
 
 def clean_data_for_json(data):
@@ -154,6 +151,9 @@ def load_db_config():
 # Variable global para conexión de historial independiente
 history_connection = None
 
+# Variable global para conexión de datos
+data_connection = None
+
 def database_exists(cursor, db_name):
     """Verifica si una base de datos existe"""
     cursor.execute(
@@ -238,7 +238,6 @@ def test_target_database_connection():
 def setup_history_connection():
     """
     Configura una conexión independiente solo para el sistema de historial.
-    Esta función no depende de PostgresSaver.
     """
     global history_connection
     
@@ -271,6 +270,27 @@ def setup_history_connection():
         history_connection = None
         return False
     
+def setup_data_connection():
+    """
+    Configura una conexión independiente para operaciones de datos.
+    """
+    global data_connection
+    
+    print("🔧 Configurando conexión para datos...")
+    
+    try:
+        db_config = load_db_config()
+        connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+        
+        data_connection = psycopg.connect(connection_string)
+        print("✅ Conexión de datos configurada exitosamente")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error configurando conexión de datos: {e}")
+        data_connection = None
+        return False
+    
 def initialize_dataset_on_startup():
     """
     Inicializa todos los datasets en BD SOLO si ENABLE_AUTO_SAVE_TO_DB es True.
@@ -285,9 +305,11 @@ def initialize_dataset_on_startup():
     print("💾 Guardado automático activado - Verificando/creando tablas de datasets...")
     
     # Crear conexión para verificar/crear tablas
-    dataset_connection = checkpoint_saver.conn if checkpoint_saver else None
+    dataset_connection = None
     if dataset_connection is None:
         try:
+            db_config = load_db_config()
+            connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
             dataset_connection = psycopg.connect(connection_string)
             print("🔗 Conexión creada para inicialización de datasets")
         except Exception as e:
@@ -341,8 +363,10 @@ def initialize_dataset_on_startup():
         return False
     finally:
         # Cerrar conexión temporal si se creó
-        if dataset_connection and dataset_connection != (checkpoint_saver.conn if checkpoint_saver else None):
+        if dataset_connection:
             dataset_connection.close()
+
+
 
 # ======================
 # Funciones de gestión de historial persistente
@@ -425,53 +449,6 @@ def get_conversation_summary():
     
     return f"Historial: {total_queries}/{MAX_CONVERSATIONS_PER_THREAD} conversaciones{limit_info}. Última: '{last_query[:50]}...'"
 
-def maintenance_cleanup_all_threads():
-    """
-    Función de mantenimiento para limpiar todas las conversaciones que excedan el límite.
-    Útil para ejecutar periódicamente o cuando sea necesario.
-    """
-    if checkpoint_saver is None:
-        print("⚠️ No se puede realizar mantenimiento: checkpoint_saver es None")
-        return False
-    
-    try:
-        with checkpoint_saver.conn.cursor() as cursor:
-            # Verificar si la tabla existe
-            cursor.execute("""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
-                    WHERE table_name = 'conversation_memory'
-                )
-            """)
-            
-            if not cursor.fetchone()[0]:
-                print("ℹ️ No hay tabla de conversaciones para limpiar")
-                return True
-            
-            # Obtener todos los threads
-            cursor.execute("SELECT thread_id FROM conversation_memory")
-            threads = cursor.fetchall()
-            
-            cleaned_threads = 0
-            total_threads = len(threads)
-            
-            print(f"🧹 Iniciando mantenimiento de {total_threads} threads...")
-            
-            for (thread_id,) in threads:
-                if cleanup_old_conversations(thread_id, MAX_CONVERSATIONS_PER_THREAD):
-                    cleaned_threads += 1
-            
-            print(f"✅ Mantenimiento completado:")
-            print(f"   Threads procesados: {total_threads}")
-            print(f"   Threads limpiados: {cleaned_threads}")
-            print(f"   Threads sin cambios: {total_threads - cleaned_threads}")
-            
-            return True
-            
-    except Exception as e:
-        print(f"❌ Error en mantenimiento general: {e}")
-        return False
-
 def save_conversation_state(state, config):
     """Guarda el historial de conversación usando la conexión independiente"""
     global history_connection
@@ -534,30 +511,6 @@ def save_conversation_state(state, config):
         print(f"⚠️ Error guardando en BD personalizada: {e}")
         return False
     
-def verify_checkpoint_saved(config):
-    """Verifica que el checkpoint se guardó correctamente"""
-    if checkpoint_saver is None:
-        return False
-    
-    try:
-        checkpoints_list = list(checkpoint_saver.list(config))
-        count = len(checkpoints_list)
-        print(f"🔍 Verificación: {count} checkpoints en BD")
-        
-        if count > 0:
-            latest = checkpoints_list[0]
-            if hasattr(latest, 'checkpoint') and latest.checkpoint:
-                channel_values = latest.checkpoint.get("channel_values", {})
-                conversations = channel_values.get("conversation_history", [])
-                print(f"🔍 Conversaciones guardadas: {len(conversations)}")
-                return True
-        
-        return False
-        
-    except Exception as e:
-        print(f"⚠️ Error verificando checkpoint: {e}")
-        return False
-    
 # ======================
 # FUNCIONES PARA GESTIÓN DEL DATASET EN BD - Agregar después de las funciones de historial
 # ======================
@@ -604,7 +557,7 @@ def check_dataset_table_exists(connection=None, table_name=None, table_schema=No
     """
     Verifica si una tabla específica existe en PostgreSQL.
     """
-    conn = connection or (checkpoint_saver.conn if checkpoint_saver else None)
+    conn = connection
     
     if conn is None:
         print("⚠️ No se puede verificar tabla: no hay conexión disponible")
@@ -635,9 +588,9 @@ def check_dataset_table_exists(connection=None, table_name=None, table_schema=No
 def get_dataset_table_info(connection=None):
     """
     Obtiene información de la tabla del dataset.
-    Acepta una conexión opcional o usa checkpoint_saver si está disponible.
+    Acepta una conexión opcional.
     """
-    conn = connection or (checkpoint_saver.conn if checkpoint_saver else None)
+    conn = connection
     
     if conn is None:
         return None
@@ -681,9 +634,6 @@ def get_dataset_table_info_by_name(table_name, connection=None):
     Obtiene información de una tabla específica por nombre.
     """
     conn = connection
-    
-    if conn is None:
-        conn = checkpoint_saver.conn if checkpoint_saver else None
     
     if conn is None:
         try:
@@ -738,9 +688,6 @@ def list_stored_tables(connection=None):
     conn = connection
     
     if conn is None:
-        conn = checkpoint_saver.conn if checkpoint_saver else None
-    
-    if conn is None:
         # Crear conexión temporal si no hay ninguna disponible
         try:
             db_config = load_db_config()
@@ -768,13 +715,12 @@ def list_stored_tables(connection=None):
             
             # Filtrar tablas del sistema
             dataset_tables = []
-            system_tables = ['conversation_memory', 'checkpoints']
+            system_tables = ['conversation_memory']
             
             for table_name, table_type in all_tables:
                 # Excluir tablas del sistema
                 is_system_table = (
                     table_name == 'conversation_memory' or
-                    table_name.startswith('checkpoints') or
                     table_name in system_tables
                 )
                 
@@ -815,7 +761,7 @@ def create_dataset_table_from_df(df: pd.DataFrame, connection=None, table_name=N
     """
     Crea una tabla en PostgreSQL desde un DataFrame.
     """
-    conn = connection or (checkpoint_saver.conn if checkpoint_saver else None)
+    conn = connection
     
     if conn is None:
         print("⚠️ No se puede crear tabla: no hay conexión disponible")
@@ -888,7 +834,7 @@ def insert_dataframe_to_table(df: pd.DataFrame, column_mapping: dict, connection
     """
     Inserta los datos del DataFrame en la tabla PostgreSQL.
     """
-    conn = connection or (checkpoint_saver.conn if checkpoint_saver else None)
+    conn = connection
     
     if conn is None:
         print("⚠️ No se puede insertar datos: no hay conexión disponible")
@@ -1019,7 +965,7 @@ def get_all_available_datasets(connection=None):
     Obtiene metadatos completos de todos los datasets disponibles (BD + archivos Excel).
     Combina información de tablas en BD y archivos Excel disponibles.
     """
-    conn = connection or (checkpoint_saver.conn if checkpoint_saver else None)
+    conn = connection
     available_datasets = {}
     
     # 1. Obtener tablas de la BD
@@ -1222,7 +1168,7 @@ def load_specific_dataset(table_name: str, connection=None):
         print(f"❌ Configuración no encontrada para dataset: {table_name}")
         return None, None, False
     
-    conn = connection or (checkpoint_saver.conn if checkpoint_saver else None)
+    conn = connection
     
     # Intentar cargar desde BD primero
     if check_dataset_table_exists(conn, table_name, dataset_config["table_schema"]):
@@ -1277,22 +1223,11 @@ if not test_target_database_connection():
     print("❌ No se pudo conectar a la base de datos objetivo. Terminando aplicación.")
     sys.exit(1)
 
-# Configurar PostgresSaver PRIMERO
-print("🔧 Configurando PostgresSaver...")
-connection_string = f"postgresql://{load_db_config()['user']}:{load_db_config()['password']}@{load_db_config()['host']}:{load_db_config()['port']}/{load_db_config()['database']}"
-
-try:
-    conn = psycopg.connect(connection_string)
-    checkpoint_saver = PostgresSaver(conn)
-    checkpoint_saver.setup()
-    print("✅ PostgresSaver configurado exitosamente")
-except Exception as e:
-    print(f"❌ Error configurando PostgresSaver: {e}")
-    print("⚠️ Continuando sin checkpoints...")
-    checkpoint_saver = None
-
 # NUEVO: Configurar sistema de historial independiente
 setup_history_connection()
+
+# Configurar sistema de conexión de datos
+setup_data_connection()
 
 # NUEVO: Inicializar dataset en BD si ENABLE_AUTO_SAVE_TO_DB está activado
 print("🔄 Inicializando sistema de dataset...")
@@ -1320,9 +1255,11 @@ def ensure_dataset_loaded():
     print("🔄 Cargando dataset bajo demanda...")
     
     # SIEMPRE crear conexión para verificar tabla (independiente de ENABLE_AUTO_SAVE_TO_DB)
-    dataset_connection = checkpoint_saver.conn if checkpoint_saver else None
+    dataset_connection = None
     if dataset_connection is None:
         try:
+            db_config = load_db_config()
+            connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
             dataset_connection = psycopg.connect(connection_string)
             print("🔗 Conexión temporal creada para dataset")
         except Exception as e:
@@ -1362,7 +1299,7 @@ def ensure_dataset_loaded():
     print(f"🗄️ Modo: {'PostgreSQL' if loaded_from_db else 'Excel'}")
     
     # Cerrar conexión temporal si se creó separada
-    if dataset_connection and dataset_connection != (checkpoint_saver.conn if checkpoint_saver else None):
+    if dataset_connection:
         dataset_connection.close()
         print("🔗 Conexión temporal cerrada")
     
@@ -1917,7 +1854,7 @@ def nodo_sql_executor(state: AgentState):
     print("🗃️ Ejecutando consulta SQL...")
     
     # Obtener conexión
-    conn = checkpoint_saver.conn if checkpoint_saver else None
+    conn = None
     if conn is None:
         # Fallback: crear conexión temporal
         try:
@@ -1973,8 +1910,14 @@ Responde SOLO con la consulta SQL, sin explicaciones:
         with conn.cursor() as cursor:
             cursor.execute(sql_query)
             
+            # Inicializar variables
+            columns = []
+            rows = []
+            result_df = None
+            has_results = cursor.description is not None
+            
             # Obtener resultados
-            if cursor.description:  # Si hay resultados
+            if has_results:  # Si hay resultados
                 columns = [desc[0] for desc in cursor.description]
                 rows = cursor.fetchall()
                 
@@ -1990,9 +1933,24 @@ Responde SOLO con la consulta SQL, sin explicaciones:
                 # Consulta sin resultados (INSERT, UPDATE, etc.)
                 rowcount = cursor.rowcount
                 state["result"] = f"Consulta SQL ejecutada. Filas afectadas: {rowcount}"
-        
-        state["success"] = True
-        print(f"✅ SQL ejecutado exitosamente")
+
+            state["success"] = True
+            print(f"✅ SQL ejecutado exitosamente")
+
+            # Mostrar resultados en consola
+            if has_results:  # Si hay resultados
+                if rows:
+                    print(f"\n📊 RESULTADOS DE LA CONSULTA:")
+                    print(f"   Filas obtenidas: {len(rows)}")
+                    print(f"   Columnas: {len(columns)}")
+                    print(f"\n{result_df.to_string(max_rows=20, max_cols=10)}")
+                    
+                    if len(rows) > 20:
+                        print(f"\n... (mostrando primeras 20 de {len(rows)} filas)")
+                else:
+                    print(f"\n📊 CONSULTA EJECUTADA - Sin resultados")
+            else:
+                print(f"\n📊 CONSULTA EJECUTADA - Filas afectadas: {rowcount}")
         
     except Exception as e:
         print(f"❌ Error ejecutando SQL: {e}")
@@ -2228,7 +2186,7 @@ def route_after_validation_modificado(state: AgentState):
 def get_table_metadata_light(table_name: str):
     """Obtiene metadatos básicos de una tabla sin cargar datos"""
     
-    conn = checkpoint_saver.conn if checkpoint_saver else None
+    conn = None
     if conn is None:
         try:
             db_config = load_db_config()
@@ -2304,18 +2262,12 @@ def create_graph_with_sql():
     # Fin del grafo
     graph.add_edge("responder", END)
 
-    # Compilar con checkpointer si está disponible
-    if checkpoint_saver is not None:
-        return graph.compile(checkpointer=checkpoint_saver)
-    else:
-        print("⚠️ Compilando grafo con SQL sin checkpoints")
-        return graph.compile()
+    return graph.compile()
 
 def main():
     app = create_graph_with_sql()
     
     print("✅ Base de datos PostgreSQL configurada correctamente")
-    print("✅ Sistema de checkpoints activado")
     print(f"🔄 Límite de conversaciones: {MAX_CONVERSATIONS_PER_THREAD} por thread")
     print(f"💾 Guardado automático a BD: {'ACTIVADO' if ENABLE_AUTO_SAVE_TO_DB else 'DESACTIVADO'}")
     print("🚀 Sistema de Análisis de Datos con Memoria Persistente")
@@ -2417,7 +2369,7 @@ def main():
                 "dataset_context": {}
             }
 
-        # Configuración para el checkpointer con thread fijo
+        # Configuración con thread ID para historial
         config = {"configurable": {"thread_id": PERSISTENT_THREAD_ID}}
 
         print(f"\n{'='*60}")
