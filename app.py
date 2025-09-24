@@ -17,7 +17,7 @@ from psycopg import sql
 import json
 
 def clean_data_for_json(data):
-    """Limpia datos para que sean serializables en JSON"""
+    """Función simplificada solo para datasets"""
     if isinstance(data, dict):
         return {k: clean_data_for_json(v) for k, v in data.items()}
     elif isinstance(data, list):
@@ -29,82 +29,11 @@ def clean_data_for_json(data):
     else:
         return data
 
-# Configuración del límite de conversaciones
-MAX_CONVERSATIONS_PER_THREAD = 10  # Límite recomendado
-
-def cleanup_old_conversations(thread_id: str, max_conversations: int = MAX_CONVERSATIONS_PER_THREAD):
-    """Limpia conversaciones antiguas, manteniendo solo las últimas max_conversations"""
-    global history_connection
-    
-    if history_connection is None:
-        print("⚠️ No se puede limpiar: history_connection es None")
-        return False
-    
-    try:
-        with history_connection.cursor() as cursor:
-            # Obtener conversaciones actuales
-            cursor.execute(
-                "SELECT conversation_data FROM conversation_memory WHERE thread_id = %s",
-                (thread_id,)
-            )
-            result = cursor.fetchone()
-            
-            if not result:
-                return False
-            
-            conversation_data = result[0]
-            if not isinstance(conversation_data, dict):
-                return False
-            
-            conversation_history = conversation_data.get("conversation_history", [])
-            
-            # Verificar si necesita limpieza
-            if len(conversation_history) <= max_conversations:
-                print(f"🔍 Historial tiene {len(conversation_history)} conversaciones, no necesita limpieza")
-                return False
-            
-            # Conservar solo las últimas max_conversations
-            cleaned_history = conversation_history[-max_conversations:]
-            conversations_removed = len(conversation_history) - len(cleaned_history)
-            
-            # Actualizar datos
-            conversation_data["conversation_history"] = cleaned_history
-            conversation_data["total_queries"] = len(cleaned_history)
-            
-            # Guardar datos actualizados
-            cursor.execute("""
-                UPDATE conversation_memory 
-                SET conversation_data = %s, 
-                    total_queries = %s,
-                    last_updated = CURRENT_TIMESTAMP
-                WHERE thread_id = %s
-            """, (
-                json.dumps(conversation_data, default=str),
-                len(cleaned_history),
-                thread_id
-            ))
-            
-            history_connection.commit()
-            
-            print(f"🧹 Limpieza completada: eliminadas {conversations_removed} conversaciones antiguas")
-            print(f"   Conservadas: {len(cleaned_history)} conversaciones más recientes")
-            
-            return True
-            
-    except Exception as e:
-        print(f"⚠️ Error en limpieza de conversaciones: {e}")
-        return False
-
 # Suprimir warnings de Google Cloud
 import warnings
 warnings.filterwarnings('ignore', message='.*ALTS.*')
 os.environ['GRPC_VERBOSITY'] = 'ERROR'
 os.environ['GRPC_TRACE'] = ''
-
-# ======================
-# Thread ID persistente para memoria a corto plazo
-# ======================
-PERSISTENT_THREAD_ID = "persistent_chat_session"
 
 # Variable para controlar el guardado automático del Excel a PostgreSQL
 ENABLE_AUTO_SAVE_TO_DB = False  # Cambiar a False para desactivar
@@ -147,9 +76,6 @@ def load_db_config():
         sys.exit(1)
     
     return db_config
-
-# Variable global para conexión de historial independiente
-history_connection = None
 
 # Variable global para conexión de datos
 data_connection = None
@@ -233,41 +159,6 @@ def test_target_database_connection():
         return True
     except psycopg.Error as e:
         print(f"❌ Error al conectar a la base de datos objetivo: {e}")
-        return False
-    
-def setup_history_connection():
-    """
-    Configura una conexión independiente solo para el sistema de historial.
-    """
-    global history_connection
-    
-    print("🔧 Configurando conexión independiente para historial...")
-    
-    try:
-        db_config = load_db_config()
-        connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
-        
-        history_connection = psycopg.connect(connection_string)
-        
-        # Crear tabla inmediatamente
-        with history_connection.cursor() as cursor:
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS conversation_memory (
-                    thread_id VARCHAR(255) PRIMARY KEY,
-                    conversation_data JSONB,
-                    total_queries INTEGER,
-                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            history_connection.commit()
-        
-        print("✅ Conexión de historial configurada exitosamente")
-        print("✅ Tabla conversation_memory creada/verificada")
-        return True
-        
-    except Exception as e:
-        print(f"❌ Error configurando conexión de historial: {e}")
-        history_connection = None
         return False
     
 def setup_data_connection():
@@ -366,150 +257,6 @@ def initialize_dataset_on_startup():
         if dataset_connection:
             dataset_connection.close()
 
-
-
-# ======================
-# Funciones de gestión de historial persistente
-# ======================
-
-def check_thread_exists():
-    """Verifica si el thread tiene historial en la tabla personalizada"""
-    global history_connection
-    
-    if history_connection is None:
-        print("🔍 Debug - history_connection es None")
-        return False
-    
-    try:
-        with history_connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT total_queries FROM conversation_memory WHERE thread_id = %s",
-                (PERSISTENT_THREAD_ID,)
-            )
-            result = cursor.fetchone()
-            
-            if result:
-                total_queries = result[0]
-                print(f"🔍 Debug - Conversación encontrada con {total_queries} consultas")
-                return True
-            else:
-                print(f"🔍 Debug - No hay historial para thread {PERSISTENT_THREAD_ID}")
-                return False
-                
-    except Exception as e:
-        print(f"⚠️ Error verificando historial: {e}")
-        return False
-
-def load_previous_context():
-    """Carga el historial desde la tabla personalizada"""
-    global history_connection
-    
-    if history_connection is None:
-        print("🔍 Debug - history_connection es None en load_previous_context")
-        return None
-    
-    try:
-        with history_connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT conversation_data FROM conversation_memory WHERE thread_id = %s",
-                (PERSISTENT_THREAD_ID,)
-            )
-            result = cursor.fetchone()
-            
-            if result:
-                conversation_data = result[0]  # JSONB se deserializa automáticamente
-                print("🔍 Debug - Contexto cargado desde tabla personalizada")
-                return conversation_data
-            else:
-                print("🔍 Debug - No hay contexto guardado")
-                return None
-                
-    except Exception as e:
-        print(f"⚠️ Error cargando contexto: {e}")
-        return None
-
-def get_conversation_summary():
-    """Obtener resumen del historial con información del límite"""
-    previous_context = load_previous_context()
-    if not previous_context:
-        return "No hay historial previo."
-    
-    if not isinstance(previous_context, dict):
-        return "No hay historial previo válido."
-    
-    conversation_history = previous_context.get("conversation_history", [])
-    if not conversation_history:
-        return "No hay consultas previas en el historial."
-    
-    total_queries = len(conversation_history)
-    last_query = conversation_history[-1].get("query", "N/A") if conversation_history else "N/A"
-    
-    # Información sobre el límite
-    limit_info = f" (límite: {MAX_CONVERSATIONS_PER_THREAD})"
-    
-    return f"Historial: {total_queries}/{MAX_CONVERSATIONS_PER_THREAD} conversaciones{limit_info}. Última: '{last_query[:50]}...'"
-
-def save_conversation_state(state, config):
-    """Guarda el historial de conversación usando la conexión independiente"""
-    global history_connection
-    
-    if history_connection is None:
-        print("⚠️ No se puede guardar: history_connection es None")
-        return False
-    
-    try:
-        conversation_history = state.get("conversation_history", [])
-        if not conversation_history:
-            print("⚠️ No hay historial de conversación para guardar")
-            return False
-        
-        thread_id = config["configurable"]["thread_id"]
-        
-        # Aplicar límite de conversaciones antes de guardar
-        if len(conversation_history) > MAX_CONVERSATIONS_PER_THREAD:
-            conversation_history = conversation_history[-MAX_CONVERSATIONS_PER_THREAD:]
-            conversations_removed = len(state.get("conversation_history", [])) - len(conversation_history)
-            
-            print(f"🧹 Aplicando límite: eliminadas {conversations_removed} conversaciones antiguas")
-            print(f"   Conservando las últimas {len(conversation_history)} conversaciones")
-            
-            # Actualizar el estado con el historial limitado
-            state["conversation_history"] = conversation_history
-            state["total_queries"] = len(conversation_history)
-        
-        with history_connection.cursor() as cursor:
-            # Preparar datos para guardar
-            conversation_data = {
-                "conversation_history": conversation_history,
-                "session_start_time": state.get("session_start_time", pd.Timestamp.now().isoformat()),
-                "total_queries": len(conversation_history),
-                "df_info": clean_data_for_json(state.get("df_info", {})),
-                "max_conversations_limit": MAX_CONVERSATIONS_PER_THREAD
-            }
-            
-            # Insertar o actualizar
-            cursor.execute("""
-                INSERT INTO conversation_memory (thread_id, conversation_data, total_queries)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (thread_id) 
-                DO UPDATE SET 
-                    conversation_data = EXCLUDED.conversation_data,
-                    total_queries = EXCLUDED.total_queries,
-                    last_updated = CURRENT_TIMESTAMP
-            """, (
-                thread_id,
-                json.dumps(conversation_data, default=str),
-                len(conversation_history)
-            ))
-            
-            history_connection.commit()
-            
-        print(f"💾 Historial guardado - {len(conversation_history)} conversaciones activas")
-        return True
-        
-    except Exception as e:
-        print(f"⚠️ Error guardando en BD personalizada: {e}")
-        return False
     
 # ======================
 # FUNCIONES PARA GESTIÓN DEL DATASET EN BD - Agregar después de las funciones de historial
@@ -715,17 +462,10 @@ def list_stored_tables(connection=None):
             
             # Filtrar tablas del sistema
             dataset_tables = []
-            system_tables = ['conversation_memory']
-            
+
             for table_name, table_type in all_tables:
-                # Excluir tablas del sistema
-                is_system_table = (
-                    table_name == 'conversation_memory' or
-                    table_name in system_tables
-                )
-                
-                if not is_system_table:
-                    dataset_tables.append(table_name)
+                # Solo agregar tablas que no sean del sistema
+                dataset_tables.append(table_name)
             
             return dataset_tables
             
@@ -1223,9 +963,6 @@ if not test_target_database_connection():
     print("❌ No se pudo conectar a la base de datos objetivo. Terminando aplicación.")
     sys.exit(1)
 
-# NUEVO: Configurar sistema de historial independiente
-setup_history_connection()
-
 # Configurar sistema de conexión de datos
 setup_data_connection()
 
@@ -1642,11 +1379,6 @@ class AgentState(TypedDict):
     df_info: dict                 # Nuevo: información cached del DataFrame
     success: bool                 # Nuevo: flag de éxito
     final_error: Optional[str]    # Nuevo: error final si no se pudo resolver
-    thread_id: str  # NUEVO: ID único para identificar la conversación
-    # NUEVOS campos para memoria persistente
-    conversation_history: List[dict]  # Historial completo de consultas y respuestas
-    session_start_time: str          # Timestamp de inicio de sesión
-    total_queries: int               # Contador total acumulativo
     # NUEVOS campos para gestión múltiple de datasets
     available_datasets: dict         # Metadatos de todos los datasets disponibles
     selected_dataset: str           # Dataset seleccionado para la consulta actual
@@ -1666,27 +1398,6 @@ class AgentState(TypedDict):
 # ======================
 # Función para gestionar historial conversacional
 # ======================
-def format_conversation_context(conversation_history: List[dict], max_entries: int = 5) -> str:
-    """Formatea el historial de conversación para incluir en prompts"""
-    if not conversation_history:
-        return ""
-    
-    # Tomar las últimas max_entries consultas
-    recent_history = conversation_history[-max_entries:]
-    
-    context_parts = []
-    for i, entry in enumerate(recent_history, 1):
-        query = entry.get("query", "N/A")
-        response = entry.get("response", "N/A")
-        success = entry.get("success", False)
-        
-        context_parts.append(f"""
-Consulta {i}: {query}
-Respuesta: {response[:200]}{"..." if len(str(response)) > 200 else ""}
-Estado: {'Éxito' if success else 'Error'}
-""")
-    
-    return "\n".join(context_parts)
 
 # ======================
 # 5. Nodos del grafo
@@ -1782,15 +1493,6 @@ def node_clasificar_modificado(state: AgentState):
     print(f"🎯 Clasificando con estrategia: {data_strategy.upper()}")
     print(f"📊 Dataset seleccionado: {state.get('dataset_context', {}).get('friendly_name', 'N/A')}")
     
-    # Contexto conversacional
-    conversation_context = ""
-    if state.get("conversation_history"):
-        conversation_context = f"""
-
-HISTORIAL DE CONVERSACIÓN PREVIA:
-{format_conversation_context(state["conversation_history"])}
-"""
-
     # Seleccionar herramientas según estrategia
     if data_strategy == "sql":
         tools_context = """
@@ -1812,7 +1514,6 @@ Analiza esta consulta para seleccionar la herramienta más apropiada:
 CONSULTA: {state['query']}
 ESTRATEGIA DEFINIDA: {data_strategy.upper()}
 DATASET: {state.get('dataset_context', {}).get('friendly_name', 'N/A')}
-{conversation_context}
 
 {tools_context}
 
@@ -1854,7 +1555,7 @@ def nodo_sql_executor(state: AgentState):
     print("🗃️ Ejecutando consulta SQL...")
     
     # Obtener conexión
-    conn = None
+    conn = data_connection  # Usar la conexión global de datos
     if conn is None:
         # Fallback: crear conexión temporal
         try:
@@ -2062,28 +1763,17 @@ def node_validar_y_decidir_modificado(state: AgentState):
     return state
 
 def node_responder(state: AgentState):
-    """Genera la respuesta final CON contexto conversacional y actualiza el historial"""
+    """Genera la respuesta final sin gestión de memoria persistente"""
     
     success = state.get("success", False)
     
-    # Contexto conversacional para el prompt
-    conversation_context = ""
-    if state.get("conversation_history"):
-        conversation_context = f"""
-
-HISTORIAL DE CONVERSACIÓN:
-{format_conversation_context(state["conversation_history"])}
-"""
-
     if success:
         prompt = f"""
 Pregunta del usuario: {state['query']}
 Resultado obtenido: {state['result']}
 Número de iteraciones necesarias: {state['iteration_count']}
-{conversation_context}
 
 Genera una respuesta clara y amigable en español explicando qué se logró.
-Si la consulta hace referencia a conversaciones anteriores, asegúrate de conectar tu respuesta con ese contexto.
 """
     else:
         errors_summary = []
@@ -2094,7 +1784,6 @@ Si la consulta hace referencia a conversaciones anteriores, asegúrate de conect
         prompt = f"""
 Pregunta del usuario: {state['query']}
 Después de {state['iteration_count']} iteraciones, no se pudo completar la tarea.
-{conversation_context}
 
 Errores encontrados:
 {chr(10).join(errors_summary)}
@@ -2107,32 +1796,6 @@ Genera una respuesta empática en español explicando:
 
     respuesta = llm.invoke(prompt).content
     print(f"\n🤖 Respuesta Final:\n{respuesta}")
-    
-    # ACTUALIZAR historial conversacional
-    new_conversation_entry = {
-        "query": state["query"],
-        "response": respuesta,
-        "success": success,
-        "timestamp": pd.Timestamp.now().isoformat(),
-        "iterations_needed": state["iteration_count"]
-    }
-    
-    # Agregar nueva entrada al historial
-    if "conversation_history" not in state:
-        state["conversation_history"] = []
-    state["conversation_history"].append(new_conversation_entry)
-    
-    # Actualizar contador total
-    state["total_queries"] = state.get("total_queries", 0) + 1
-    
-    # NUEVO: GUARDAR ESTADO INMEDIATAMENTE
-    config = {"configurable": {"thread_id": state.get("thread_id", PERSISTENT_THREAD_ID)}}
-    save_success = save_conversation_state(state, config)
-    
-    if save_success:
-        print(f"💾 Historial guardado exitosamente - {state['total_queries']} consultas totales")
-    else:
-        print("⚠️ Error guardando historial en base de datos")
     
     # Log final
     state["history"].append(f"Responder → Finalizado con {'éxito' if success else 'error'}")
@@ -2186,7 +1849,7 @@ def route_after_validation_modificado(state: AgentState):
 def get_table_metadata_light(table_name: str):
     """Obtiene metadatos básicos de una tabla sin cargar datos"""
     
-    conn = None
+    conn = data_connection  # Usar la conexión global de datos
     if conn is None:
         try:
             db_config = load_db_config()
@@ -2268,126 +1931,63 @@ def main():
     app = create_graph_with_sql()
     
     print("✅ Base de datos PostgreSQL configurada correctamente")
-    print(f"🔄 Límite de conversaciones: {MAX_CONVERSATIONS_PER_THREAD} por thread")
     print(f"💾 Guardado automático a BD: {'ACTIVADO' if ENABLE_AUTO_SAVE_TO_DB else 'DESACTIVADO'}")
-    print("🚀 Sistema de Análisis de Datos con Memoria Persistente")
+    print("🚀 Sistema de Análisis de Datos")
     print("   Dataset se cargará al hacer la primera consulta")
-    print("   Escribe 'salir' para terminar")
-    print("   Escribe 'limpiar' para forzar limpieza de conversaciones\n")
+    print("   Escribe 'salir' para terminar\n")
     
-    # El sistema de historial ya está configurado, no necesitamos forzar creación
-    if history_connection:
-        print("🔧 Sistema de historial listo")
-    else:
-        print("⚠️ Sistema de historial no disponible")
-
     # Mostrar archivos almacenados
     show_stored_files()
     print()
     
-    # Cargar contexto ANTES del bucle para inicialización correcta
-    print("🔍 Verificando historial existente...")
-    thread_exists = check_thread_exists()
-    previous_context = None
-    
-    if thread_exists:
-        previous_context = load_previous_context()
-        if previous_context:
-            summary = get_conversation_summary()
-            print(f"💭 Memoria encontrada: {summary}")
-            print("   Continuando conversación existente...\n")
-            
-            # Verificar y limpiar si es necesario al inicio
-            cleanup_old_conversations(PERSISTENT_THREAD_ID, MAX_CONVERSATIONS_PER_THREAD)
-        else:
-            print("⚠️ Thread existe pero no se pudo cargar contexto\n")
-            thread_exists = False
-    else:
-        print("🆕 Iniciando nueva conversación\n")
-    
     while True:
-        query = input("Pregunta sobre el dataset (o 'salir' / 'limpiar'): ")
+        query = input("Pregunta sobre el dataset (o 'salir'): ")
         
         if query.lower() == "salir":
             break
-        elif query.lower() == "limpiar":
-            print("🧹 Ejecutando limpieza manual...")
-            cleanup_old_conversations(PERSISTENT_THREAD_ID, MAX_CONVERSATIONS_PER_THREAD)
-            continue
 
-        # Crear estado inicial basado en contexto pre-cargado
-        if previous_context and isinstance(previous_context, dict):
-            # Continuar desde estado previo
-            initial_state = {
-                "query": query,
-                "action": "",
-                "result": None,
-                "thought": "",
-                "history": [],
-                "execution_history": [],
-                "iteration_count": 0,
-                "max_iterations": 3,
-                "df_info": previous_context.get("df_info", {}),
-                "success": False,
-                "final_error": None,
-                "next_node": "clasificar",
-                "thread_id": PERSISTENT_THREAD_ID,
-                # Cargar historial existente
-                "conversation_history": previous_context.get("conversation_history", []),
-                "session_start_time": previous_context.get("session_start_time", str(pd.Timestamp.now())),
-                "total_queries": previous_context.get("total_queries", 0),
-                # NUEVOS campos para gestión múltiple de datasets
-                "available_datasets": {},
-                "selected_dataset": None,
-                "active_dataframe": None,
-                "dataset_context": {}
-            }
-        else:
-            # Nuevo estado inicial solo si NO hay contexto previo
-            initial_state = {
-                "query": query,
-                "action": "",
-                "result": None,
-                "thought": "",
-                "history": [],
-                "execution_history": [],
-                "iteration_count": 0,
-                "max_iterations": 3,
-                "df_info": {},
-                "success": False,
-                "final_error": None,
-                "next_node": "clasificar",
-                "thread_id": PERSISTENT_THREAD_ID,
-                # Nuevo historial
-                "conversation_history": [],
-                "session_start_time": str(pd.Timestamp.now()),
-                "total_queries": 0,
-                # NUEVOS campos para gestión múltiple de datasets
-                "available_datasets": {},
-                "selected_dataset": None,
-                "active_dataframe": None,
-                "dataset_context": {}
-            }
-
-        # Configuración con thread ID para historial
-        config = {"configurable": {"thread_id": PERSISTENT_THREAD_ID}}
+        # Estado inicial simple sin memoria
+        initial_state = {
+            "query": query,
+            "action": "",
+            "result": None,
+            "thought": "",
+            "history": [],
+            "execution_history": [],
+            "iteration_count": 0,
+            "max_iterations": 3,
+            "df_info": {},
+            "success": False,
+            "final_error": None,
+            "next_node": "clasificar",
+            # Campos para gestión de datasets
+            "available_datasets": {},
+            "selected_dataset": None,
+            "active_dataframe": None,
+            "dataset_context": {},
+            # Campos para SQL
+            "data_strategy": "dataframe",
+            "sql_feasible": False,
+            "table_metadata": {},
+            "strategy_history": [],
+            "sql_results": None,
+            "strategy_switched": False,
+            "needs_fallback": False,
+            "strategy_reason": "",
+            "sql_error": None
+        }
 
         print(f"\n{'='*60}")
         print(f"🔄 Procesando consulta: {query}")
-        print(f"💭 Total de consultas en sesión: {initial_state['total_queries']}")
         print(f"{'='*60}")
         
         try:
-            final_state = app.invoke(initial_state, config=config)
-            
-            # Actualizar contexto para próximas consultas en la misma sesión
-            previous_context = final_state.copy()
-            thread_exists = True
+            # Eliminar el parámetro config
+            final_state = app.invoke(initial_state)
             
             print(f"\n📊 RESUMEN DE EJECUCIÓN:")
             print(f"   Iteraciones totales: {final_state['iteration_count']}")
             print(f"   Éxito: {final_state.get('success', False)}")
-            print(f"   Total consultas en historial: {final_state.get('total_queries', 0)}")
             if not final_state.get('success', False):
                 print(f"   Error final: {final_state.get('final_error', 'N/A')}")
             
