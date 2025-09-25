@@ -15,6 +15,9 @@ import sys
 import psycopg
 from psycopg import sql
 import json
+from langgraph.checkpoint.postgres import PostgresSaver
+import uuid
+from datetime import datetime
 
 def clean_data_for_json(data):
     """Función simplificada solo para datasets"""
@@ -28,6 +31,37 @@ def clean_data_for_json(data):
         return data.isoformat()
     else:
         return data
+    
+def clean_state_for_serialization(state):
+    """
+    Limpia el estado para que sea serializable por msgpack.
+    Remueve o convierte objetos no serializables como DataFrames.
+    """
+    cleaned_state = state.copy()
+    
+    # Limpiar sql_results si contiene DataFrame
+    if "sql_results" in cleaned_state and hasattr(cleaned_state["sql_results"], 'to_dict'):
+        df = cleaned_state["sql_results"]
+        cleaned_state["sql_results"] = {
+            "data": df.head(100).to_dict('records'),  # Limitar a 100 filas
+            "columns": df.columns.tolist(),
+            "shape": df.shape,
+            "serialized": True
+        }
+    
+    # Limpiar otros campos que puedan contener objetos no serializables
+    if "df_info" in cleaned_state and "sample" in cleaned_state["df_info"]:
+        # Ya está limpio por clean_data_for_json, pero verificar
+        pass
+    
+    # Limpiar execution_history de posibles objetos no serializables
+    if "execution_history" in cleaned_state:
+        for record in cleaned_state["execution_history"]:
+            if "result" in record and hasattr(record["result"], 'to_dict'):
+                # Si el resultado es un DataFrame, convertirlo
+                record["result"] = f"DataFrame con shape {record['result'].shape}"
+    
+    return cleaned_state
 
 # Suprimir warnings de Google Cloud
 import warnings
@@ -54,6 +88,12 @@ DATASETS_TO_PROCESS = [
 
 DATASET_CONFIG = DATASETS_TO_PROCESS[0]  # Mantener ncr_ride_bookings como principal
 
+# Variable global para PostgresSaver
+postgres_saver = None
+
+SINGLE_USER_THREAD_ID = "single_user_persistent_thread"
+SINGLE_USER_ID = "default_user"
+
 # ======================
 # 0. Configuración y creación de BD PostgreSQL
 # ======================
@@ -76,6 +116,70 @@ def load_db_config():
         sys.exit(1)
     
     return db_config
+
+def setup_postgres_saver():
+    """
+    Configura e inicializa PostgresSaver para memoria de conversaciones.
+    CORREGIDO DEFINITIVAMENTE: Crea instancia directa sin context manager
+    """
+    print("🧠 Configurando PostgresSaver para memoria conversacional...")
+    
+    try:
+        db_config = load_db_config()
+        
+        # Crear connection string para PostgresSaver
+        postgres_uri = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+        
+        # CORRECCIÓN: Crear instancia directa sin usar context manager
+        checkpointer = PostgresSaver.from_conn_string(postgres_uri)
+        
+        # Configurar las tablas automáticamente
+        checkpointer.setup()
+        
+        print("✅ PostgresSaver configurado exitosamente")
+        print("📊 Tablas de memoria creadas: checkpoints, checkpoint_blobs, checkpoint_writes")
+        
+        return checkpointer
+        
+    except Exception as e:
+        print(f"❌ Error configurando PostgresSaver: {e}")
+        # Intentar método alternativo
+        return setup_postgres_saver_alternative()
+
+def get_automatic_thread_id():
+    """
+    Retorna el thread ID fijo para el usuario único.
+    Elimina la necesidad de configuración manual.
+    """
+    print(f"🔑 Usando thread persistente automático: {SINGLE_USER_THREAD_ID}")
+    return SINGLE_USER_THREAD_ID
+
+def list_user_conversations(postgres_saver_instance, user_id: str = None):
+    """
+    Lista las conversaciones previas del usuario.
+    """
+    if not postgres_saver_instance:
+        print("⚠️ PostgresSaver no disponible")
+        return []
+    
+    try:
+        # Obtener checkpoints del usuario
+        if user_id:
+            # Buscar threads que contengan el user_id
+            thread_pattern = f"user_{user_id}_persistent"
+        else:
+            # Listar todos los threads de sesión recientes
+            thread_pattern = "session_%"
+        
+        print(f"📋 Buscando conversaciones para patrón: {thread_pattern}")
+        # Nota: La implementación específica depende de la API interna de PostgresSaver
+        # Aquí se podría implementar una consulta directa a la tabla checkpoints
+        
+        return []  # Placeholder - requiere acceso directo a la tabla checkpoints
+        
+    except Exception as e:
+        print(f"❌ Error listando conversaciones: {e}")
+        return []
 
 # Variable global para conexión de datos
 data_connection = None
@@ -497,6 +601,32 @@ def show_stored_files():
     for i, table_name in enumerate(stored_tables, 1):
         print(f"   {i}. {table_name}")
 
+def show_conversation_memory(thread_id: str):
+    """
+    Muestra un resumen de la memoria de conversación para debugging.
+    """
+    # Primero hacer debugging de la estructura
+    # debug_checkpoint_structure(thread_id)
+    
+    conversation_history, user_context = load_conversation_history(thread_id)
+    
+    if conversation_history:
+        print(f"🧠 Memoria encontrada:")
+        print(f"   📚 {len(conversation_history)} conversaciones previas")
+        print(f"   📊 Datasets usados: {user_context.get('common_datasets', [])}")
+        print(f"   🎯 Estrategia preferida: {user_context.get('preferred_analysis_type', 'N/A')}")
+        print(f"   ⚠️ Patrones de error: {len(user_context.get('error_patterns', []))}")
+        
+        # Mostrar última conversación
+        if conversation_history:
+            last_conv = conversation_history[-1]
+            print(f"   🕒 Última consulta: {last_conv.get('query', 'N/A')[:50]}...")
+            print(f"   ✅ Fue exitosa: {last_conv.get('success', False)}")
+    else:
+        print("🧠 No se encontró memoria previa")
+    
+    print()
+
 def create_dataset_table_from_df(df: pd.DataFrame, connection=None, table_name=None, table_schema=None):
     """
     Crea una tabla en PostgreSQL desde un DataFrame.
@@ -695,6 +825,318 @@ def load_excel_to_postgres(connection=None, force_load=False):
     except Exception as e:
         print(f"❌ Error procesando Excel: {e}")
         return None, False
+
+def setup_postgres_saver_alternative():
+    """
+    Configuración alternativa de PostgresSaver usando conexión directa.
+    """
+    print("🔄 Intentando configuración alternativa de PostgresSaver...")
+    
+    try:
+        db_config = load_db_config()
+        postgres_uri = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+        
+        # Método 1: Usando pool de conexiones
+        try:
+            import psycopg_pool
+            pool = psycopg_pool.ConnectionPool(postgres_uri, min_size=1, max_size=5)
+            checkpointer = PostgresSaver(pool)
+            checkpointer.setup()
+            print("✅ PostgresSaver configurado con pool de conexiones")
+            return checkpointer
+        except ImportError:
+            print("⚠️ psycopg_pool no disponible, usando conexión directa")
+        
+        # Método 2: Usando conexión psycopg directa
+        conn = psycopg.connect(postgres_uri)
+        checkpointer = PostgresSaver(conn)
+        
+        # Intentar setup
+        try:
+            checkpointer.setup()
+            print("✅ PostgresSaver configurado con conexión directa")
+            return checkpointer
+        except Exception as setup_error:
+            print(f"⚠️ Advertencia en setup automático: {setup_error}")
+            # Crear tablas manualmente
+            create_checkpoint_tables_manually(conn)
+            print("✅ PostgresSaver configurado con tablas manuales")
+            return checkpointer
+            
+    except Exception as e:
+        print(f"❌ Error en configuración alternativa: {e}")
+        print("⚠️ Continuando sin memoria persistente")
+        return None
+
+def load_conversation_history(thread_id: str):
+    """
+    Recupera el historial de conversaciones desde PostgresSaver para un thread específico.
+    CORREGIDO: Maneja correctamente la estructura del checkpoint
+    """
+    global postgres_saver
+    
+    if not postgres_saver:
+        print("⚠️ PostgresSaver no disponible para recuperar historial")
+        return [], {}
+    
+    try:
+        # Obtener el checkpoint más reciente para este thread
+        config = {"configurable": {"thread_id": thread_id}}
+        
+        # Intentar obtener el estado más reciente
+        checkpoint = postgres_saver.get(config)
+        
+        if checkpoint:
+            # El checkpoint es un diccionario con la estructura correcta
+            # Buscar en los valores del estado
+            state_values = None
+            
+            # Intentar diferentes formas de acceder a los datos
+            if isinstance(checkpoint, dict):
+                # Caso 1: El checkpoint es directamente el diccionario de estado
+                if "conversation_history" in checkpoint:
+                    state_values = checkpoint
+                # Caso 2: Los valores están en una clave específica
+                elif "values" in checkpoint:
+                    state_values = checkpoint["values"]
+                elif "state" in checkpoint:
+                    state_values = checkpoint["state"]
+                # Caso 3: Buscar en las claves del checkpoint
+                else:
+                    # Buscar cualquier clave que contenga conversation_history
+                    for key, value in checkpoint.items():
+                        if isinstance(value, dict) and "conversation_history" in value:
+                            state_values = value
+                            break
+            
+            if state_values and "conversation_history" in state_values:
+                # Recuperar historial de conversaciones
+                conversation_history = state_values.get("conversation_history", [])
+                user_context = state_values.get("user_context", {
+                    "preferred_analysis_type": None,
+                    "common_datasets": [],
+                    "visualization_preferences": [],
+                    "error_patterns": [],
+                    "last_interaction": None
+                })
+                
+                print(f"📚 Historial recuperado: {len(conversation_history)} conversaciones previas")
+                print(f"👤 Contexto de usuario recuperado: {len(user_context.get('common_datasets', []))} datasets comunes")
+                
+                return conversation_history, user_context
+            else:
+                print("📭 No se encontró historial en la estructura del checkpoint")
+                # Para debugging: mostrar las claves disponibles
+                if isinstance(checkpoint, dict):
+                    print(f"🔍 Claves disponibles en checkpoint: {list(checkpoint.keys())}")
+                return [], {}
+        else:
+            print("📭 No se encontró checkpoint previo para este thread")
+            return [], {}
+            
+    except Exception as e:
+        print(f"⚠️ Error recuperando historial: {e}")
+        # Para debugging: mostrar más información del error
+        print(f"🔍 Tipo de error: {type(e).__name__}")
+        if hasattr(e, 'args'):
+            print(f"🔍 Detalles: {e.args}")
+        return [], {}
+    
+def debug_checkpoint_structure(thread_id: str):
+    """
+    Función de debugging para inspeccionar la estructura del checkpoint.
+    """
+    global postgres_saver
+    
+    if not postgres_saver:
+        return
+    
+    try:
+        config = {"configurable": {"thread_id": thread_id}}
+        checkpoint = postgres_saver.get(config)
+        
+        print("🔍 DEBUGGING CHECKPOINT STRUCTURE:")
+        print(f"   Tipo de checkpoint: {type(checkpoint)}")
+        
+        if checkpoint:
+            if isinstance(checkpoint, dict):
+                print(f"   Claves en checkpoint: {list(checkpoint.keys())}")
+                for key, value in checkpoint.items():
+                    print(f"   {key}: {type(value)} - {str(value)[:100]}...")
+            else:
+                print(f"   Checkpoint no es dict: {checkpoint}")
+        else:
+            print("   Checkpoint es None")
+            
+    except Exception as e:
+        print(f"❌ Error en debugging: {e}")
+
+def extract_learned_patterns_from_history(conversation_history: List[dict]) -> List[str]:
+    """
+    Extrae patrones aprendidos del historial de conversaciones existente.
+    """
+    patterns = []
+    
+    # Analizar conversaciones exitosas
+    successful_conversations = [conv for conv in conversation_history if conv.get("success", False)]
+    
+    if successful_conversations:
+        # Estrategias más exitosas
+        strategies = [conv["strategy_used"] for conv in successful_conversations if conv.get("strategy_used")]
+        if strategies:
+            most_common = max(set(strategies), key=strategies.count)
+            patterns.append(f"Estrategia más exitosa: {most_common}")
+        
+        # Datasets más utilizados
+        datasets = [conv["dataset_used"] for conv in successful_conversations if conv.get("dataset_used") != "unknown"]
+        if datasets:
+            most_common_dataset = max(set(datasets), key=datasets.count)
+            patterns.append(f"Dataset más usado: {most_common_dataset}")
+        
+        # Patrones de iteraciones
+        iterations = [conv["iterations"] for conv in successful_conversations if conv.get("iterations", 0) > 1]
+        if iterations:
+            avg_iterations = sum(iterations) / len(iterations)
+            patterns.append(f"Promedio iteraciones complejas: {avg_iterations:.1f}")
+    
+    return patterns[-5:]  # Solo los 5 más relevantes
+    
+def diagnose_postgres_saver():
+    """
+    Función de diagnóstico mejorada para verificar el estado de PostgresSaver
+    """
+    print("🔍 Diagnosticando configuración de PostgresSaver...")
+    
+    try:
+        # 1. Verificar instalación de módulos
+        try:
+            from langgraph.checkpoint.postgres import PostgresSaver
+            print("✅ Módulo PostgresSaver importado correctamente")
+        except ImportError as e:
+            print(f"❌ Error importando PostgresSaver: {e}")
+            return False
+        
+        # 2. Verificar conexión a BD
+        db_config = load_db_config()
+        postgres_uri = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+        
+        with psycopg.connect(postgres_uri) as conn:
+            print("✅ Conexión PostgreSQL exitosa")
+            
+            # 3. Verificar tablas de checkpoint
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    SELECT table_name 
+                    FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name LIKE '%checkpoint%'
+                    ORDER BY table_name
+                """)
+                
+                checkpoint_tables = [t[0] for t in cursor.fetchall()]
+                expected_tables = ['checkpoints', 'checkpoint_blobs', 'checkpoint_writes', 'checkpoint_migrations']
+                
+                print(f"📋 Tablas encontradas: {checkpoint_tables}")
+                missing_tables = [t for t in expected_tables if t not in checkpoint_tables]
+                
+                if missing_tables:
+                    print(f"⚠️ Tablas faltantes: {missing_tables}")
+                    return False
+                else:
+                    print("✅ Todas las tablas de checkpoint están presentes")
+        
+        # 4. Intentar crear PostgresSaver
+        try:
+            checkpointer = PostgresSaver.from_conn_string(postgres_uri)
+            print("✅ PostgresSaver creado exitosamente")
+            
+            # 5. Verificar que tiene los métodos necesarios
+            required_methods = ['get_next_version', 'setup', 'get', 'put']
+            for method in required_methods:
+                if hasattr(checkpointer, method):
+                    print(f"✅ Método {method} disponible")
+                else:
+                    print(f"❌ Método {method} no encontrado")
+                    return False
+            
+            return True
+            
+        except Exception as ps_error:
+            print(f"❌ Error creando PostgresSaver: {ps_error}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Error en diagnóstico: {e}")
+        return False
+    
+def create_checkpoint_tables_manually(conn):
+    """
+    Crea las tablas de checkpoint manualmente si el setup automático falla.
+    """
+    print("🛠️ Creando tablas de checkpoint manualmente...")
+    
+    try:
+        with conn.cursor() as cursor:
+            # Tabla principal de checkpoints
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS checkpoints (
+                    thread_id TEXT NOT NULL,
+                    checkpoint_id TEXT NOT NULL,
+                    parent_checkpoint_id TEXT,
+                    checkpoint_blob BYTEA,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (thread_id, checkpoint_id)
+                )
+            """)
+            
+            # Tabla para blobs grandes
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS checkpoint_blobs (
+                    thread_id TEXT NOT NULL,
+                    checkpoint_id TEXT NOT NULL,
+                    channel TEXT NOT NULL,
+                    blob BYTEA,
+                    PRIMARY KEY (thread_id, checkpoint_id, channel),
+                    FOREIGN KEY (thread_id, checkpoint_id) REFERENCES checkpoints(thread_id, checkpoint_id)
+                )
+            """)
+            
+            # Tabla para escrituras
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS checkpoint_writes (
+                    thread_id TEXT NOT NULL,
+                    checkpoint_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    idx INTEGER NOT NULL,
+                    channel TEXT NOT NULL,
+                    type TEXT,
+                    blob BYTEA,
+                    PRIMARY KEY (thread_id, checkpoint_id, task_id, idx),
+                    FOREIGN KEY (thread_id, checkpoint_id) REFERENCES checkpoints(thread_id, checkpoint_id)
+                )
+            """)
+            
+            # Tabla de migraciones (si no existe)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS checkpoint_migrations (
+                    version INTEGER PRIMARY KEY,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Insertar versión de migración si no existe
+            cursor.execute("""
+                INSERT INTO checkpoint_migrations (version) 
+                VALUES (1) 
+                ON CONFLICT (version) DO NOTHING
+            """)
+            
+            conn.commit()
+            print("✅ Tablas de checkpoint creadas manualmente")
+            
+    except Exception as e:
+        print(f"❌ Error creando tablas manualmente: {e}")
+        conn.rollback()
 
 # ======================
 # FUNCIONES PARA GESTIÓN MÚLTIPLE DE DATASETS
@@ -1394,6 +1836,12 @@ class AgentState(TypedDict):
     needs_fallback: bool           # Si necesita fallback a DataFrame
     strategy_reason: str           # Razón de la estrategia elegida
     sql_error: Optional[str]       # Error específico de SQL si ocurre
+    # NUEVOS CAMPOS PARA MEMORIA PERSISTENTE
+    conversation_history: List[dict]      # Historial de conversaciones completas
+    user_context: dict                   # Contexto del usuario (preferencias, patrones)
+    memory_summary: str                  # Resumen de conversaciones previas
+    learned_patterns: List[str]          # Patrones aprendidos del usuario
+    session_metadata: dict               # Metadatos de la sesión actual
 
 # ======================
 # Función para gestionar historial conversacional
@@ -1403,62 +1851,109 @@ class AgentState(TypedDict):
 # 5. Nodos del grafo
 # ======================
 def nodo_estrategia_datos(state: AgentState):
-    """NUEVO: Decide si usar SQL o DataFrame basándose en la consulta"""
+    """
+    MODIFICADO: Ahora recupera historial desde PostgresSaver y actualiza contexto
+    """
+    print("🧠 Iniciando análisis con recuperación de memoria...")
     
+    # PASO 6A: Recuperar historial desde PostgresSaver - CORREGIDO
+    if not state.get("conversation_history"):
+        # Intentar cargar desde PostgresSaver usando el thread_id
+        thread_id = state.get("session_metadata", {}).get("thread_id", SINGLE_USER_THREAD_ID)
+        conversation_history, user_context = load_conversation_history(thread_id)
+        
+        state["conversation_history"] = conversation_history
+        state["user_context"] = user_context if user_context else {
+            "preferred_analysis_type": None,
+            "common_datasets": [],
+            "visualization_preferences": [],
+            "error_patterns": [],
+            "last_interaction": None
+        }
+    
+    # Generar resumen de conversaciones previas para contexto
+    if state["conversation_history"]:
+        memory_summary = generate_memory_summary(state["conversation_history"])
+        state["memory_summary"] = memory_summary
+        print(f"💭 Memoria recuperada: {len(state['conversation_history'])} conversaciones previas")
+        print(f"📝 Resumen: {memory_summary[:100]}...")
+        
+        # Cargar patrones aprendidos desde el historial
+        if not state.get("learned_patterns"):
+            state["learned_patterns"] = extract_learned_patterns_from_history(state["conversation_history"])
+    else:
+        state["memory_summary"] = "Primera conversación con el usuario"
+        print("🆕 Primera interacción - sin historial previo")
+    
+    # NUEVO: Detectar consultas sobre memoria ANTES de analizar estrategia
+    if is_memory_query(state["query"]):
+        print("🧠 Consulta sobre memoria detectada - respuesta directa")
+        state["data_strategy"] = "memory"
+        state["strategy_reason"] = "Consulta sobre historial de conversaciones - respuesta directa desde memoria cargada"
+        state["result"] = generate_memory_response(state)
+        state["success"] = True
+        state["history"].append(f"Memoria → Respuesta directa sobre historial")
+        return state
+    
+    # Resto del código original para consultas normales...
     print("🔍 Analizando estrategia de acceso a datos...")
     
-    # Obtener metadatos de tablas disponibles sin cargar datos
     if not state.get("available_datasets"):
         state["available_datasets"] = get_all_available_datasets()
     
-    # Identificar dataset apropiado
     if not state.get("selected_dataset"):
-        selected_dataset = identify_dataset_from_query(state["query"], state["available_datasets"])
+        # MEJORADO: Usar contexto histórico para selección de dataset
+        selected_dataset = identify_dataset_from_query_with_memory(
+            state["query"], 
+            state["available_datasets"],
+            state["user_context"]
+        )
         if selected_dataset:
             state["selected_dataset"] = selected_dataset
             state["dataset_context"] = state["available_datasets"][selected_dataset]
     
-    # Obtener metadatos de la tabla sin cargar el DataFrame completo
+    # Obtener metadatos y analizar estrategia (código original)
     table_metadata = get_table_metadata_light(state["selected_dataset"])
     state["table_metadata"] = table_metadata
     
-    # Analizar consulta para determinar estrategia
+    # Analizar consulta con contexto histórico
     strategy_prompt = f"""
-Analiza esta consulta y determina la mejor estrategia de acceso a datos:
+Analiza esta consulta considerando el historial del usuario:
 
-CONSULTA: {state['query']}
+CONSULTA ACTUAL: {state['query']}
+MEMORIA DEL USUARIO: {state['memory_summary']}
+CONTEXTO HISTÓRICO: {state['user_context']}
 
 METADATOS DE TABLA DISPONIBLE:
 - Tabla: {state['selected_dataset']}
 - Columnas: {table_metadata.get('columns', [])[:10]}
 - Filas estimadas: {table_metadata.get('row_count', 'N/A')}
 
+PATRONES APRENDIDOS:
+{', '.join(state.get('learned_patterns', []))}
+
 CRITERIOS PARA SQL:
-- Consultas de conteo simple ("¿cuántos registros hay?")
-- Filtros básicos ("mostrar datos de enero")
-- Agregaciones simples (suma, promedio, máximo, mínimo)
-- Consultas de metadatos (columnas, tipos)
-- Exploración inicial de datos
-- Top N registros o muestras
+- Consultas de conteo simple
+- Filtros básicos
+- Agregaciones simples
+- Consultas similares a las exitosas anteriormente
 
 CRITERIOS PARA DATAFRAME:
 - Análisis estadísticos complejos
-- Visualizaciones y gráficos
-- Correlaciones y análisis avanzados
-- Transformaciones complejas
-- Machine learning
-- Operaciones que requieren pandas específicamente
+- Visualizaciones (considerando preferencias previas)
+- Análisis avanzados
+- Si el usuario ha tenido problemas con SQL antes
 
 Responde:
 Strategy: sql|dataframe
-Reason: <breve explicación del por qué>
+Reason: <explicación considerando el historial>
 SQL_Feasible: true|false
 """
     
     response = llm.invoke(strategy_prompt).content.strip()
     
-    # Extraer decisión
-    strategy = "dataframe"  # default
+    # Extraer decisión (código original)
+    strategy = "dataframe"
     sql_feasible = False
     reason = ""
     
@@ -1470,14 +1965,12 @@ SQL_Feasible: true|false
         elif line.lower().startswith("reason:"):
             reason = line.split(":", 1)[1].strip()
     
-    # Actualizar estado
     state["data_strategy"] = strategy
     state["sql_feasible"] = sql_feasible
     state["strategy_reason"] = reason
     
     print(f"📊 Estrategia seleccionada: {strategy.upper()}")
-    print(f"🔍 Razón: {reason}")
-    print(f"🗃️ SQL factible: {sql_feasible}")
+    print(f"🔍 Razón (con memoria): {reason}")
     
     state["history"].append(f"Estrategia → {strategy.upper()} - {reason}")
     
@@ -1625,8 +2118,16 @@ Responde SOLO con la consulta SQL, sin explicaciones:
                 # Convertir a DataFrame para compatibilidad
                 if rows:
                     result_df = pd.DataFrame(rows, columns=columns)
-                    state["sql_results"] = result_df
-                    state["result"] = f"Consulta SQL ejecutada exitosamente. Resultados:\n{result_df}"
+                    if result_df is not None and not result_df.empty:
+                        # Convertir DataFrame a formato serializable
+                        state["sql_results"] = {
+                            "data": result_df.to_dict('records'),
+                            "columns": result_df.columns.tolist(),
+                            "shape": result_df.shape
+                        }
+                    else:
+                        state["sql_results"] = None
+                    state["result"] = f"Consulta SQL ejecutada exitosamente. {len(result_df)} filas obtenidas."
                 else:
                     state["sql_results"] = pd.DataFrame()
                     state["result"] = "Consulta SQL ejecutada exitosamente. Sin resultados."
@@ -1673,6 +2174,22 @@ def node_ejecutar_python(state: AgentState):
     """Ejecuta código Python con manejo robusto de errores y contexto"""
     
     print(f"⚙️ Ejecutando Python - Intento {state['iteration_count'] + 1}")
+    
+    # Asegurar que el dataset esté cargado
+    if not ensure_dataset_loaded():
+        state["success"] = False
+        state["result"] = "Error: No se pudo cargar el dataset"
+        return state
+    
+    # Verificar y construir df_info si es necesario
+    if not state.get("df_info") or 'columns' not in state["df_info"]:
+        sample_clean = df.head(2).fillna("NULL").to_dict()
+        state["df_info"] = {
+            "columns": list(df.columns),
+            "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
+            "shape": df.shape,
+            "sample": sample_clean
+        }
     
     # Generar código con contexto completo
     code_prompt = build_code_prompt(
@@ -1763,17 +2280,20 @@ def node_validar_y_decidir_modificado(state: AgentState):
     return state
 
 def node_responder(state: AgentState):
-    """Genera la respuesta final sin gestión de memoria persistente"""
-    
+    """
+    MODIFICADO: Ahora actualiza memoria con nueva información
+    """
     success = state.get("success", False)
     
+    # Generar respuesta (código original)
     if success:
         prompt = f"""
 Pregunta del usuario: {state['query']}
 Resultado obtenido: {state['result']}
 Número de iteraciones necesarias: {state['iteration_count']}
+Contexto histórico: {state.get('memory_summary', 'N/A')}
 
-Genera una respuesta clara y amigable en español explicando qué se logró.
+Genera una respuesta clara y amigable en español, considerando conversaciones previas si las hay.
 """
     else:
         errors_summary = []
@@ -1784,26 +2304,58 @@ Genera una respuesta clara y amigable en español explicando qué se logró.
         prompt = f"""
 Pregunta del usuario: {state['query']}
 Después de {state['iteration_count']} iteraciones, no se pudo completar la tarea.
+Contexto histórico: {state.get('memory_summary', 'N/A')}
 
 Errores encontrados:
 {chr(10).join(errors_summary)}
 
-Genera una respuesta empática en español explicando:
-1. Que se intentó resolver la consulta múltiples veces
-2. Los principales problemas encontrados (en términos simples)
-3. Sugerencias para el usuario (ej: verificar formato de datos, columnas, etc.)
+Genera una respuesta empática considerando el historial, explicando:
+1. Que se intentó resolver múltiples veces
+2. Los problemas encontrados
+3. Sugerencias basadas en patrones previos si los hay
 """
 
     respuesta = llm.invoke(prompt).content
     print(f"\n🤖 Respuesta Final:\n{respuesta}")
     
-    # Log final
-    state["history"].append(f"Responder → Finalizado con {'éxito' if success else 'error'}")
+    # PASO 6B: Actualizar memoria con nueva información
+    conversation_record = {
+        "timestamp": datetime.now().isoformat(),
+        "query": state["query"],
+        "success": success,
+        "strategy_used": state.get("data_strategy", "unknown"),
+        "dataset_used": state.get("selected_dataset", "unknown"),
+        "iterations": state["iteration_count"],
+        "errors": [record for record in state["execution_history"] if not record["success"]],
+        "response": respuesta
+    }
+    
+    # Agregar a historial de conversaciones
+    if not state.get("conversation_history"):
+        state["conversation_history"] = []
+    state["conversation_history"].append(conversation_record)
+    
+    # Actualizar contexto del usuario
+    update_user_context(state, conversation_record)
+    
+    # Actualizar patrones aprendidos
+    update_learned_patterns(state, conversation_record)
+    
+    print("💾 Memoria actualizada con nueva conversación")
+
+    # Limpiar estado para serialización
+    cleaned_state = clean_state_for_serialization(state)
+    
+    # Actualizar el estado con la versión limpia
+    for key, value in cleaned_state.items():
+        state[key] = value
+    
+    state["history"].append(f"Responder → Finalizado con {'éxito' if success else 'error'} + memoria actualizada")
     
     return state
 
 def route_after_classification(state: AgentState):
-    """Determina si ir a SQL_Executor o Python_Interpreter"""
+    """Determina si ir a SQL_Executor, Python_Interpreter o responder directamente"""
     action = state.get("action", "Python_Interpreter")
     data_strategy = state.get("data_strategy", "dataframe")
     
@@ -1811,7 +2363,12 @@ def route_after_classification(state: AgentState):
     print(f"   Action: {action}")
     print(f"   Strategy: {data_strategy}")
     
-    # Mapeo de acciones a nodos
+    # NUEVO: Manejar consultas de memoria
+    if data_strategy == "memory":
+        print("   → Routing to: responder (memoria)")
+        return "responder"
+    
+    # Mapeo de acciones a nodos para consultas normales
     if action == "SQL_Executor" or (data_strategy == "sql" and action not in ["Python_Interpreter"]):
         print("   → Routing to: sql_executor")
         return "sql_executor"
@@ -1894,50 +2451,226 @@ def get_table_metadata_light(table_name: str):
 # ======================
 # 6. Construir el grafo
 # ======================
+
 def create_graph_with_sql():
-    """Crea el grafo con los nuevos nodos SQL"""
+    """Crea el grafo con los nuevos nodos SQL y PostgresSaver"""
+    global postgres_saver
+    
     graph = StateGraph(AgentState)
 
     # Nodos existentes + nuevos
-    graph.add_node("estrategia_datos", nodo_estrategia_datos)  # NUEVO
-    graph.add_node("clasificar", node_clasificar_modificado)   # MODIFICADO
-    graph.add_node("sql_executor", nodo_sql_executor)          # NUEVO
-    graph.add_node("ejecutar_python", node_ejecutar_python)    # EXISTENTE
-    graph.add_node("validar", node_validar_y_decidir_modificado) # MODIFICADO
-    graph.add_node("responder", node_responder)                # EXISTENTE
+    graph.add_node("estrategia_datos", nodo_estrategia_datos)
+    graph.add_node("clasificar", node_clasificar_modificado)
+    graph.add_node("sql_executor", nodo_sql_executor)
+    graph.add_node("ejecutar_python", node_ejecutar_python)
+    graph.add_node("validar", node_validar_y_decidir_modificado)
+    graph.add_node("responder", node_responder)
 
-    # Nuevo punto de entrada
+    # Punto de entrada
     graph.set_entry_point("estrategia_datos")
 
-    # Flujo principal modificado
+    # Flujo principal
     graph.add_edge("estrategia_datos", "clasificar")
-    
-    # Routing condicional desde clasificación
     graph.add_conditional_edges("clasificar", route_after_classification)
-    
-    # Ambos ejecutores van a validación
     graph.add_edge("sql_executor", "validar")
     graph.add_edge("ejecutar_python", "validar")
-    
-    # Routing condicional desde validación (con fallbacks)
     graph.add_conditional_edges("validar", route_after_validation_modificado)
-    
-    # Fin del grafo
     graph.add_edge("responder", END)
 
-    return graph.compile()
+    # NUEVO: Compilar con checkpointer si está disponible
+    if postgres_saver:
+        print("🧠 Compilando grafo con memoria persistente (PostgresSaver)")
+        return graph.compile(checkpointer=postgres_saver)
+    else:
+        print("⚠️ Compilando grafo sin memoria persistente")
+        return graph.compile()
+
+def generate_memory_summary(conversation_history: List[dict]) -> str:
+    """
+    Genera un resumen conciso de las conversaciones previas.
+    """
+    if not conversation_history:
+        return "Sin historial previo"
+    
+    recent_conversations = conversation_history[-5:]  # Últimas 5 conversaciones
+    
+    summary_parts = []
+    successful_queries = sum(1 for conv in recent_conversations if conv["success"])
+    total_queries = len(recent_conversations)
+    
+    summary_parts.append(f"Últimas {total_queries} consultas: {successful_queries} exitosas")
+    
+    # Datasets más utilizados
+    datasets_used = [conv["dataset_used"] for conv in recent_conversations if conv["dataset_used"] != "unknown"]
+    if datasets_used:
+        most_common_dataset = max(set(datasets_used), key=datasets_used.count)
+        summary_parts.append(f"Dataset preferido: {most_common_dataset}")
+    
+    # Estrategias exitosas
+    successful_strategies = [conv["strategy_used"] for conv in recent_conversations if conv["success"]]
+    if successful_strategies:
+        most_successful_strategy = max(set(successful_strategies), key=successful_strategies.count)
+        summary_parts.append(f"Estrategia exitosa: {most_successful_strategy}")
+    
+    return "; ".join(summary_parts)
+
+def identify_dataset_from_query_with_memory(query: str, available_datasets: dict, user_context: dict) -> str:
+    """
+    Versión mejorada que considera el historial del usuario.
+    """
+    # Usar la función original como base
+    base_result = identify_dataset_from_query(query, available_datasets)
+    
+    # Considerar datasets comunes del usuario
+    common_datasets = user_context.get("common_datasets", [])
+    if common_datasets and base_result in common_datasets:
+        print(f"✅ Dataset confirmado por historial: {base_result}")
+        return base_result
+    
+    # Si hay ambigüedad, preferir el dataset más usado históricamente
+    if not base_result and common_datasets:
+        preferred = common_datasets[0]  # El más usado
+        print(f"🔄 Usando dataset preferido por historial: {preferred}")
+        return preferred
+    
+    return base_result
+
+def is_memory_query(query: str) -> bool:
+    """
+    Detecta si la consulta es sobre memoria/historial de conversaciones.
+    """
+    memory_keywords = [
+        "recuerda", "recuerdas", "memoria", "historial", "anteriormente", "antes",
+        "pregunta anterior", "consulta anterior", "conversación anterior", 
+        "hablamos", "dijiste", "respondiste", "pregunte", "pregunté", "charlamos",
+        "intercambio", "diálogo", "sesión anterior", "que te dije", "que me dijiste"
+    ]
+    
+    query_lower = query.lower()
+    return any(keyword in query_lower for keyword in memory_keywords)
+
+def generate_memory_response(state: AgentState) -> str:
+    """
+    Genera una respuesta directa sobre la memoria/historial sin usar SQL o herramientas.
+    """
+    conversation_history = state.get("conversation_history", [])
+    query = state["query"]
+    
+    if not conversation_history:
+        return "No tengo memoria de conversaciones anteriores en esta sesión."
+    
+    # Crear resumen de conversaciones previas
+    recent_conversations = conversation_history[-3:]  # Últimas 3 para ser más específico
+    
+    response_parts = [
+        f"Sí, recuerdo nuestras {len(conversation_history)} conversaciones anteriores:"
+    ]
+    
+    for i, conv in enumerate(recent_conversations, 1):
+        query_text = conv.get("query", "N/A")[:80] + ("..." if len(conv.get("query", "")) > 80 else "")
+        success_status = "exitosa" if conv.get("success", False) else "no exitosa"
+        response_parts.append(f"{i}. Preguntaste: \"{query_text}\" - Consulta {success_status}")
+    
+    # Agregar información de contexto
+    user_context = state.get("user_context", {})
+    datasets_used = user_context.get("common_datasets", [])
+    if datasets_used:
+        response_parts.append(f"\nHas trabajado principalmente con: {', '.join(datasets_used)}")
+    
+    preferred_strategy = user_context.get("preferred_analysis_type")
+    if preferred_strategy:
+        response_parts.append(f"Tu estrategia de análisis preferida es: {preferred_strategy}")
+    
+    return "\n".join(response_parts)
+
+def update_user_context(state: AgentState, conversation_record: dict):
+    """
+    Actualiza el contexto del usuario basado en la conversación actual.
+    """
+    user_context = state["user_context"]
+    
+    # Actualizar último timestamp de interacción
+    user_context["last_interaction"] = conversation_record["timestamp"]
+    
+    # Actualizar datasets comunes
+    dataset_used = conversation_record["dataset_used"]
+    if dataset_used != "unknown":
+        if dataset_used not in user_context["common_datasets"]:
+            user_context["common_datasets"].append(dataset_used)
+        else:
+            # Mover al frente (más reciente)
+            user_context["common_datasets"].remove(dataset_used)
+            user_context["common_datasets"].insert(0, dataset_used)
+    
+    # Mantener solo los 3 más usados
+    user_context["common_datasets"] = user_context["common_datasets"][:3]
+    
+    # Actualizar análisis preferido
+    if conversation_record["success"]:
+        strategy = conversation_record["strategy_used"]
+        if not user_context["preferred_analysis_type"]:
+            user_context["preferred_analysis_type"] = strategy
+        elif user_context["preferred_analysis_type"] != strategy:
+            # Alternar basado en éxito reciente
+            user_context["preferred_analysis_type"] = strategy
+    
+    # Registrar patrones de error
+    if conversation_record["errors"]:
+        error_types = [error["error_type"] for error in conversation_record["errors"]]
+        for error_type in error_types:
+            if error_type not in user_context["error_patterns"]:
+                user_context["error_patterns"].append(error_type)
+
+def update_learned_patterns(state: AgentState, conversation_record: dict):
+    """
+    Actualiza los patrones aprendidos del comportamiento del usuario.
+    """
+    if not state.get("learned_patterns"):
+        state["learned_patterns"] = []
+    
+    patterns = state["learned_patterns"]
+    
+    # Patrón de éxito
+    if conversation_record["success"]:
+        success_pattern = f"Exitoso: {conversation_record['strategy_used']} en {conversation_record['dataset_used']}"
+        if success_pattern not in patterns:
+            patterns.append(success_pattern)
+    
+    # Patrón de múltiples iteraciones
+    if conversation_record["iterations"] > 1:
+        iteration_pattern = f"Requiere {conversation_record['iterations']} iteraciones para consultas complejas"
+        if iteration_pattern not in patterns and conversation_record["iterations"] <= 3:
+            patterns.append(iteration_pattern)
+    
+    # Mantener solo los 5 patrones más recientes
+    state["learned_patterns"] = patterns[-5:]
 
 def main():
+    global postgres_saver
+    
+    # Configurar PostgresSaver
+    postgres_saver = setup_postgres_saver()
+    
     app = create_graph_with_sql()
     
     print("✅ Base de datos PostgreSQL configurada correctamente")
     print(f"💾 Guardado automático a BD: {'ACTIVADO' if ENABLE_AUTO_SAVE_TO_DB else 'DESACTIVADO'}")
-    print("🚀 Sistema de Análisis de Datos")
+    print(f"🧠 Memoria conversacional: {'ACTIVADA' if postgres_saver else 'DESACTIVADA'}")
+    
+    # CORREGIDO: Thread ID automático para usuario único
+    thread_id = get_automatic_thread_id()
+    
+    print("🚀 Sistema de Análisis de Datos con Memoria Persistente")
+    print("   Memoria automática activada para usuario único")
     print("   Dataset se cargará al hacer la primera consulta")
     print("   Escribe 'salir' para terminar\n")
     
     # Mostrar archivos almacenados
     show_stored_files()
+
+    # Mostrar memoria de conversación
+    show_conversation_memory(thread_id)
+
     print()
     
     while True:
@@ -1946,7 +2679,7 @@ def main():
         if query.lower() == "salir":
             break
 
-        # Estado inicial simple sin memoria
+        # Estado inicial CON CAMPOS DE MEMORIA AUTOMÁTICA
         initial_state = {
             "query": query,
             "action": "",
@@ -1960,12 +2693,10 @@ def main():
             "success": False,
             "final_error": None,
             "next_node": "clasificar",
-            # Campos para gestión de datasets
             "available_datasets": {},
             "selected_dataset": None,
             "active_dataframe": None,
             "dataset_context": {},
-            # Campos para SQL
             "data_strategy": "dataframe",
             "sql_feasible": False,
             "table_metadata": {},
@@ -1974,25 +2705,50 @@ def main():
             "strategy_switched": False,
             "needs_fallback": False,
             "strategy_reason": "",
-            "sql_error": None
+            "sql_error": None,
+            
+            # CAMPOS DE MEMORIA AUTOMÁTICA - SE CARGARÁN EN nodo_estrategia_datos
+            "conversation_history": [],  # Se cargará desde PostgresSaver
+            "user_context": {},          # Se cargará desde PostgresSaver
+            "memory_summary": "",        # Se generará desde historial cargado
+            "learned_patterns": [],      # Se extraerán desde historial cargado
+            "session_metadata": {
+                "thread_id": thread_id,
+                "session_start": datetime.now().isoformat(),
+                "user_id": SINGLE_USER_ID
+            }
         }
 
         print(f"\n{'='*60}")
         print(f"🔄 Procesando consulta: {query}")
+        print(f"🧠 Thread automático: {thread_id}")
         print(f"{'='*60}")
         
         try:
-            # Eliminar el parámetro config
-            final_state = app.invoke(initial_state)
+            # CORREGIDO: Configurar thread automático para memoria persistente
+            config = {"configurable": {"thread_id": thread_id}} if postgres_saver else {}
+            
+            # Invocar con configuración de thread
+            final_state = app.invoke(initial_state, config=config)
+
+            # Limpiar estado final para evitar problemas de serialización futuros
+            final_state = clean_state_for_serialization(final_state)
             
             print(f"\n📊 RESUMEN DE EJECUCIÓN:")
             print(f"   Iteraciones totales: {final_state['iteration_count']}")
             print(f"   Éxito: {final_state.get('success', False)}")
+            print(f"   Conversaciones en memoria: {len(final_state.get('conversation_history', []))}")
+            print(f"   Patrones aprendidos: {len(final_state.get('learned_patterns', []))}")
+            if postgres_saver:
+                print(f"   Estado persistido automáticamente")
             if not final_state.get('success', False):
                 print(f"   Error final: {final_state.get('final_error', 'N/A')}")
             
         except Exception as e:
             print(f"❌ Error crítico en el sistema: {e}")
+            import traceback
+            print("🔍 Detalles del error:")
+            traceback.print_exc()
             
         print(f"\n{'-'*60}\n")
 
