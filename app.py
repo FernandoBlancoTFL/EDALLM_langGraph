@@ -18,6 +18,7 @@ import json
 from langgraph.checkpoint.postgres import PostgresSaver
 import uuid
 from datetime import datetime
+import re
 
 def clean_data_for_json(data):
     """Función simplificada solo para datasets"""
@@ -120,7 +121,7 @@ def load_db_config():
 def setup_postgres_saver():
     """
     Configura e inicializa PostgresSaver para memoria de conversaciones.
-    CORREGIDO DEFINITIVAMENTE: Crea instancia directa sin context manager
+    CORREGIDO: Usa autocommit para evitar problemas con índices concurrentes
     """
     print("🧠 Configurando PostgresSaver para memoria conversacional...")
     
@@ -130,16 +131,20 @@ def setup_postgres_saver():
         # Crear connection string para PostgresSaver
         postgres_uri = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
         
-        # CORRECCIÓN: Crear instancia directa sin usar context manager
-        checkpointer = PostgresSaver.from_conn_string(postgres_uri)
+        # CORRECCIÓN: Crear con autocommit para evitar error de índices concurrentes
+        conn = psycopg.connect(postgres_uri, autocommit=True)
+        checkpointer = PostgresSaver(conn)
         
         # Configurar las tablas automáticamente
-        checkpointer.setup()
-        
-        print("✅ PostgresSaver configurado exitosamente")
-        print("📊 Tablas de memoria creadas: checkpoints, checkpoint_blobs, checkpoint_writes")
-        
-        return checkpointer
+        try:
+            checkpointer.setup()
+            print("✅ PostgresSaver configurado exitosamente")
+            print("📊 Tablas de memoria creadas: checkpoints, checkpoint_blobs, checkpoint_writes")
+            return checkpointer
+        except Exception as setup_error:
+            print(f"⚠️ Error en setup: {setup_error}")
+            # Fallback a método alternativo
+            return setup_postgres_saver_alternative()
         
     except Exception as e:
         print(f"❌ Error configurando PostgresSaver: {e}")
@@ -564,12 +569,20 @@ def list_stored_tables(connection=None):
             
             all_tables = cursor.fetchall()
             
-            # Filtrar tablas del sistema
+            # Filtrar tablas del sistema y tablas de checkpoint
+            excluded_tables = {
+                'checkpoint_blobs', 
+                'checkpoint_migrations', 
+                'checkpoint_writes', 
+                'checkpoints'
+            }
+
             dataset_tables = []
 
             for table_name, table_type in all_tables:
-                # Solo agregar tablas que no sean del sistema
-                dataset_tables.append(table_name)
+                # Solo agregar tablas que no sean del sistema ni de checkpoints
+                if table_name not in excluded_tables:
+                    dataset_tables.append(table_name)
             
             return dataset_tables
             
@@ -597,7 +610,7 @@ def show_stored_files():
         print("   SELECT table_name FROM information_schema.tables WHERE table_schema = 'public';")
         return
     
-    print(f"📁 Archivos almacenados en la base de datos ({len(stored_tables)} encontrados):")
+    print(f"📁 Los siguientes archivos se encuentran en mi BD. Puedes preguntar sobre ellos ({len(stored_tables)} encontrados):")
     for i, table_name in enumerate(stored_tables, 1):
         print(f"   {i}. {table_name}")
 
@@ -828,7 +841,7 @@ def load_excel_to_postgres(connection=None, force_load=False):
 
 def setup_postgres_saver_alternative():
     """
-    Configuración alternativa de PostgresSaver usando conexión directa.
+    Configuración alternativa de PostgresSaver usando conexión con autocommit.
     """
     print("🔄 Intentando configuración alternativa de PostgresSaver...")
     
@@ -836,31 +849,22 @@ def setup_postgres_saver_alternative():
         db_config = load_db_config()
         postgres_uri = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
         
-        # Método 1: Usando pool de conexiones
-        try:
-            import psycopg_pool
-            pool = psycopg_pool.ConnectionPool(postgres_uri, min_size=1, max_size=5)
-            checkpointer = PostgresSaver(pool)
-            checkpointer.setup()
-            print("✅ PostgresSaver configurado con pool de conexiones")
-            return checkpointer
-        except ImportError:
-            print("⚠️ psycopg_pool no disponible, usando conexión directa")
+        # SOLUCIÓN: Crear conexión con autocommit=True para evitar problemas con CREATE INDEX CONCURRENTLY
+        conn = psycopg.connect(postgres_uri, autocommit=True)
         
-        # Método 2: Usando conexión psycopg directa
-        conn = psycopg.connect(postgres_uri)
+        # Crear PostgresSaver con la conexión configurada
         checkpointer = PostgresSaver(conn)
         
-        # Intentar setup
+        # Intentar setup (ahora debería funcionar con autocommit)
         try:
             checkpointer.setup()
-            print("✅ PostgresSaver configurado con conexión directa")
+            print("✅ PostgresSaver configurado con conexión en modo autocommit")
             return checkpointer
         except Exception as setup_error:
-            print(f"⚠️ Advertencia en setup automático: {setup_error}")
-            # Crear tablas manualmente
-            create_checkpoint_tables_manually(conn)
-            print("✅ PostgresSaver configurado con tablas manuales")
+            print(f"⚠️ Error en setup automático: {setup_error}")
+            # Si falla, intentar crear tablas manualmente SIN índices concurrentes
+            create_checkpoint_tables_manually_no_concurrent(conn)
+            print("✅ PostgresSaver configurado con tablas manuales (sin índices concurrentes)")
             return checkpointer
             
     except Exception as e:
@@ -1137,6 +1141,90 @@ def create_checkpoint_tables_manually(conn):
     except Exception as e:
         print(f"❌ Error creando tablas manualmente: {e}")
         conn.rollback()
+
+def create_checkpoint_tables_manually_no_concurrent(conn):
+    """
+    Crea las tablas de checkpoint manualmente SIN índices concurrentes.
+    Versión compatible con el error de transacción.
+    """
+    print("🛠️ Creando tablas de checkpoint sin índices concurrentes...")
+    
+    try:
+        with conn.cursor() as cursor:
+            # Tabla principal de checkpoints
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS checkpoints (
+                    thread_id TEXT NOT NULL,
+                    checkpoint_ns TEXT NOT NULL DEFAULT '',
+                    checkpoint_id TEXT NOT NULL,
+                    parent_checkpoint_id TEXT,
+                    type TEXT,
+                    checkpoint JSONB NOT NULL,
+                    metadata JSONB NOT NULL DEFAULT '{}',
+                    PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+                )
+            """)
+            
+            # Crear índice normal (no concurrente)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS checkpoints_thread_id_idx 
+                ON checkpoints(thread_id, checkpoint_ns)
+            """)
+            
+            # Tabla para blobs grandes
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS checkpoint_blobs (
+                    thread_id TEXT NOT NULL,
+                    checkpoint_ns TEXT NOT NULL DEFAULT '',
+                    channel TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    blob BYTEA,
+                    PRIMARY KEY (thread_id, checkpoint_ns, channel, version)
+                )
+            """)
+            
+            # Tabla para escrituras
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS checkpoint_writes (
+                    thread_id TEXT NOT NULL,
+                    checkpoint_ns TEXT NOT NULL DEFAULT '',
+                    checkpoint_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    idx INTEGER NOT NULL,
+                    channel TEXT NOT NULL,
+                    type TEXT,
+                    blob BYTEA NOT NULL,
+                    PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
+                )
+            """)
+            
+            # Crear índice normal para writes
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS checkpoint_writes_thread_id_idx 
+                ON checkpoint_writes(thread_id, checkpoint_ns, checkpoint_id)
+            """)
+            
+            # Tabla de migraciones
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS checkpoint_migrations (
+                    v INTEGER PRIMARY KEY,
+                    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Insertar versión de migración
+            cursor.execute("""
+                INSERT INTO checkpoint_migrations (v) 
+                VALUES (1) 
+                ON CONFLICT (v) DO NOTHING
+            """)
+            
+            print("✅ Tablas de checkpoint creadas sin índices concurrentes")
+            
+    except Exception as e:
+        print(f"❌ Error creando tablas sin índices concurrentes: {e}")
+        raise
 
 # ======================
 # FUNCIONES PARA GESTIÓN MÚLTIPLE DE DATASETS
@@ -1420,76 +1508,120 @@ dataset_info = None
 df = None
 dataset_loaded = False
 
-def ensure_dataset_loaded():
+def ensure_dataset_loaded(state=None):
     """
     Función para cargar el dataset solo cuando sea necesario.
-    Carga el dataset completo sin límites.
+    Ahora respeta el dataset seleccionado en el estado.
     """
     global dataset_info, df, dataset_loaded
     
-    if dataset_loaded and df is not None:
-        print("✅ Dataset ya está cargado en memoria")
-        return True
-    
-    print("🔄 Cargando dataset bajo demanda...")
-    
-    # SIEMPRE crear conexión para verificar tabla (independiente de ENABLE_AUTO_SAVE_TO_DB)
-    dataset_connection = None
-    if dataset_connection is None:
-        try:
-            db_config = load_db_config()
-            connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
-            dataset_connection = psycopg.connect(connection_string)
-            print("🔗 Conexión temporal creada para dataset")
-        except Exception as e:
-            print(f"❌ Error creando conexión temporal: {e}")
-            print("📄 Continuando solo con archivo Excel...")
-            dataset_connection = None
-    
-    # Cargar dataset (ahora siempre con conexión si es posible)
-    dataset_info, loaded_from_db = load_excel_to_postgres(dataset_connection, force_load=False)
-    
-    if dataset_info is None:
-        print("❌ No se pudo cargar el dataset")
+    # Determinar qué dataset cargar
+    if state and state.get("selected_dataset"):
+        target_dataset = state["selected_dataset"]
+        print(f"🎯 Cargando dataset seleccionado: {target_dataset}")
+    else:
+        print("❌ No se especificó dataset y no hay fallback por defecto")
         return False
     
-    # Crear DataFrame completo (SIN LÍMITES)
-    if loaded_from_db and dataset_connection:
-        print("🔄 Creando DataFrame completo desde PostgreSQL...")
+    # Verificar si ya está cargado el dataset correcto
+    if dataset_loaded and df is not None and dataset_info:
+        current_dataset = dataset_info.get("table_name", "")
+        if current_dataset == target_dataset:
+            print("✅ Dataset correcto ya está cargado en memoria")
+            return True
+        else:
+            print(f"🔄 Dataset actual ({current_dataset}) no coincide, recargando...")
+            dataset_loaded = False
+    
+    print(f"🔄 Cargando dataset: {target_dataset}")
+    
+    # Buscar configuración del dataset objetivo
+    dataset_config = None
+    for config in DATASETS_TO_PROCESS:
+        if config["table_name"] == target_dataset:
+            dataset_config = config
+            break
+    
+    if not dataset_config:
+        print(f"❌ Configuración no encontrada para: {target_dataset}")
+        return False
+    
+    # Crear conexión temporal
+    dataset_connection = None
+    try:
+        db_config = load_db_config()
+        connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+        dataset_connection = psycopg.connect(connection_string)
+        print("🔗 Conexión temporal creada para dataset")
+    except Exception as e:
+        print(f"⚠️ Error creando conexión: {e}")
+        dataset_connection = None
+    
+    # Intentar cargar desde BD primero
+    if dataset_connection and check_dataset_table_exists(
+        dataset_connection, 
+        dataset_config["table_name"], 
+        dataset_config["table_schema"]
+    ):
+        print(f"🔄 Cargando {target_dataset} desde PostgreSQL...")
         try:
             with dataset_connection.cursor() as cursor:
-                # CARGAR COMPLETO - SIN LÍMITE
-                cursor.execute(f"SELECT * FROM {DATASET_CONFIG['table_schema']}.{DATASET_CONFIG['table_name']}")
+                cursor.execute(f"SELECT * FROM {dataset_config['table_schema']}.{dataset_config['table_name']}")
                 rows = cursor.fetchall()
                 columns = [desc[0] for desc in cursor.description]
                 df = pd.DataFrame(rows, columns=columns)
-                print(f"✅ DataFrame completo creado desde BD: {df.shape}")
+                
+                dataset_info = {
+                    "columns": list(df.columns),
+                    "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
+                    "row_count": len(df),
+                    "table_name": target_dataset
+                }
+                dataset_loaded = True
+                print(f"✅ Dataset {target_dataset} cargado desde BD: {df.shape}")
+                
+                if dataset_connection:
+                    dataset_connection.close()
+                return True
         except Exception as e:
-            print(f"❌ Error creando DataFrame desde BD: {e}")
-            print("📄 Fallback: cargando desde Excel...")
-            df = pd.read_excel(DATASET_CONFIG['excel_path'])
+            print(f"❌ Error cargando desde BD: {e}")
     else:
-        # Cargar desde Excel (siempre completo)
-        df = pd.read_excel(DATASET_CONFIG['excel_path'])
-        print(f"✅ Dataset completo cargado desde Excel: {df.shape}")
+        print(f"🔍 Tabla '{target_dataset}' no existe en BD")
     
-    dataset_loaded = True
-    print(f"📊 Dataset listo: {len(df)} filas, {len(df.columns)} columnas")
-    print(f"🗄️ Modo: {'PostgreSQL' if loaded_from_db else 'Excel'}")
+    # Fallback: cargar desde Excel
+    if os.path.exists(dataset_config["excel_path"]):
+        print(f"📂 Cargando archivo Excel: {dataset_config['excel_path']}")
+        try:
+            df = pd.read_excel(dataset_config["excel_path"])
+            dataset_info = {
+                "columns": list(df.columns),
+                "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
+                "row_count": len(df),
+                "table_name": target_dataset
+            }
+            dataset_loaded = True
+            print(f"📊 Excel cargado: {df.shape[0]} filas, {df.shape[1]} columnas")
+            
+            if dataset_connection:
+                dataset_connection.close()
+            return True
+        except Exception as e:
+            print(f"❌ Error cargando Excel: {e}")
+    else:
+        print(f"❌ Archivo Excel no encontrado: {dataset_config['excel_path']}")
     
-    # Cerrar conexión temporal si se creó separada
     if dataset_connection:
         dataset_connection.close()
-        print("🔗 Conexión temporal cerrada")
     
-    return True
+    print(f"❌ No se pudo cargar el dataset: {target_dataset}")
+    return False
 
 # Configurar API y directorios
 api_key = os.getenv("GOOGLE_API_KEY")
 os.makedirs("./outputs", exist_ok=True)
 
 # Inicializar LLM
-llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=api_key, temperature=0)
+llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", google_api_key=api_key, temperature=0)
 # llm = ChatOllama(model="gemma3", temperature=0)
 
 # ======================
@@ -1500,37 +1632,66 @@ python_repl = PythonREPLTool()
 def run_python_with_df(code: str, error_context: Optional[str] = None):
     """
     Ejecuta código Python con acceso al DataFrame `df` ya cargado.
-    Incluye contexto de errores previos para mejor debugging.
+    IMPORTANTE: Asume que el dataset correcto ya fue cargado por node_ejecutar_python.
     """
-    # Asegurar que el dataset esté cargado
-    if not ensure_dataset_loaded():
+    # Verificar que hay un dataset cargado (NO recargar)
+    if df is None or not dataset_loaded:
         return {
             "success": False,
             "result": None,
-            "error": "No se pudo cargar el dataset",
-            "error_type": "dataset_loading_error"
+            "error": "No hay dataset cargado en memoria",
+            "error_type": "dataset_not_loaded"
         }
+
+    # NO recargar dataset aquí - debe estar ya cargado por node_ejecutar_python
+    # Solo verificar que existe
     
-    local_vars = {"df": df, "pd": pd, "plt": plt, "sns": sns, "os": os}
+    # Contexto completo de ejecución con todos los módulos necesarios
+    local_vars = {
+        "df": df, 
+        "pd": pd, 
+        "plt": plt, 
+        "sns": sns, 
+        "os": os,
+        "np": pd.np if hasattr(pd, 'np') else None  # numpy si está disponible
+    }
+    
+    # También agregar a globals para funciones definidas en el código
+    global_vars = {
+        "df": df,
+        "pd": pd,
+        "plt": plt,
+        "sns": sns,
+        "os": os
+    }
 
     prohibited_patterns = [
-        "pd.DataFrame",
-        "df = ",
-        "data = {",
-        "= pd.DataFrame",
+        "pd.DataFrame(",
+        "pandas.DataFrame(",
         "DataFrame(",
+        "= pd.read_csv",
+        "= pd.read_excel",
         "# Datos de ejemplo",
         "datos de ejemplo",
         "reemplaza con tu DataFrame"
     ]
     
-    code_lower = code.lower()
+    # Validar patrones prohibidos de forma más inteligente
     for pattern in prohibited_patterns:
-        if pattern.lower() in code_lower:
+        # Usar regex para detectar creación real de DataFrames
+        if pattern in ["pd.DataFrame(", "pandas.DataFrame(", "DataFrame("]:
+            if re.search(r'(pd\.|pandas\.)?DataFrame\s*\(', code):
+                return {
+                    "success": False,
+                    "result": None,
+                    "error": f"Código bloqueado. Detectado intento de crear DataFrame. Usa SOLO el df existente.",
+                    "error_type": "prohibited_pattern"
+                }
+        elif pattern.lower() in code.lower():
             return {
                 "success": False,
                 "result": None,
-                "error": f"Código bloqueado. Detectado intento de crear DataFrame: '{pattern}'. Usa SOLO el df existente.",
+                "error": f"Código bloqueado. Detectado patrón prohibido: '{pattern}'",
                 "error_type": "prohibited_pattern"
             }
 
@@ -1539,10 +1700,10 @@ def run_python_with_df(code: str, error_context: Optional[str] = None):
         parsed = ast.parse(code)
         if parsed.body and isinstance(parsed.body[-1], ast.Expr):
             last_expr = parsed.body.pop()
-            exec(compile(ast.Module(parsed.body, type_ignores=[]), filename="<ast>", mode="exec"), {}, local_vars)
-            result = eval(compile(ast.Expression(last_expr.value), filename="<ast>", mode="eval"), {}, local_vars)
+            exec(compile(ast.Module(parsed.body, type_ignores=[]), filename="<ast>", mode="exec"), global_vars, local_vars)
+            result = eval(compile(ast.Expression(last_expr.value), filename="<ast>", mode="eval"), global_vars, local_vars)
         else:
-            exec(code, {}, local_vars)
+            exec(code, global_vars, local_vars)
             result = None
 
         return {
@@ -1573,9 +1734,14 @@ def get_dataframe(_):
     Devuelve el DataFrame completo al LLM.
     Este tool permite que el agente acceda a 'df' directamente para cualquier análisis.
     """
-    # Asegurar que el dataset esté cargado
-    if not ensure_dataset_loaded():
-        return "Error: No se pudo cargar el dataset"
+
+    # Verificar que hay dataset cargado
+    if df is None or not dataset_loaded:
+        return "Error: No hay dataset cargado. Use ensure_dataset_loaded primero."
+
+    # Verificar que hay dataset cargado (NO recargar)
+    if df is None or not dataset_loaded:
+        return "Error: No hay dataset cargado en memoria"
     
     return df
 
@@ -1709,24 +1875,24 @@ def plot_payment_method_distribution(_):
     plt.show()
     return f"✅ Gráfico de métodos de pago generado y guardado en {file_path}"
 
-def plot_booking_value_by_vehicle_type(_):
-    """Genera un boxplot de Booking Value según Vehicle Type."""
-    if "Booking Value" not in df.columns or "Vehicle Type" not in df.columns:
-        return "No existen las columnas necesarias (Booking Value, Vehicle Type)."
+# def plot_booking_value_by_vehicle_type(_):
+#     """Genera un boxplot de Booking Value según Vehicle Type."""
+#     if "Booking Value" not in df.columns or "Vehicle Type" not in df.columns:
+#         return "No existen las columnas necesarias (Booking Value, Vehicle Type)."
     
-    plt.figure(figsize=(12,6))
-    import seaborn as sns
-    sns.boxplot(data=df, x="Vehicle Type", y="Booking Value", palette="Set2")
-    plt.title("Distribución de Booking Value por tipo de vehículo", fontsize=16)
-    plt.xlabel("Tipo de Vehículo", fontsize=12)
-    plt.ylabel("Booking Value", fontsize=12)
-    plt.xticks(rotation=30, ha="right")
-    plt.grid(axis="y", alpha=0.5)
+#     plt.figure(figsize=(12,6))
+#     import seaborn as sns
+#     sns.boxplot(data=df, x="Vehicle Type", y="Booking Value", palette="Set2")
+#     plt.title("Distribución de Booking Value por tipo de vehículo", fontsize=16)
+#     plt.xlabel("Tipo de Vehículo", fontsize=12)
+#     plt.ylabel("Booking Value", fontsize=12)
+#     plt.xticks(rotation=30, ha="right")
+#     plt.grid(axis="y", alpha=0.5)
 
-    file_path = "./outputs/booking_value_by_vehicle_type.png"
-    plt.savefig(file_path, dpi=300, bbox_inches="tight")
-    plt.show()
-    return f"✅ Boxplot generado y guardado en {file_path}"
+#     file_path = "./outputs/booking_value_by_vehicle_type.png"
+#     plt.savefig(file_path, dpi=300, bbox_inches="tight")
+#     plt.show()
+#     return f"✅ Boxplot generado y guardado en {file_path}"
 
 tools = [
     Tool(name="get_summary", func=get_summary, description="Muestra un resumen estadístico del dataset"),
@@ -1742,7 +1908,7 @@ tools = [
     Tool(name="plot_correlation_heatmap", func=plot_correlation_heatmap, description="Genera un heatmap de correlaciones entre variables numéricas"),
     Tool(name="plot_time_series", func=plot_time_series, description="Genera una serie temporal de cantidad de viajes por día"),
     Tool(name="plot_payment_method_distribution", func=plot_payment_method_distribution, description="Genera un gráfico de barras de métodos de pago ordenados por frecuencia"),
-    Tool(name="plot_booking_value_by_vehicle_type", func=plot_booking_value_by_vehicle_type, description="Genera un boxplot de Booking Value por tipo de vehículo"),
+    # Tool(name="plot_booking_value_by_vehicle_type", func=plot_booking_value_by_vehicle_type, description="Genera un boxplot de Booking Value por tipo de vehículo"),
     Tool(
         name="Python_Interpreter",
         func=run_python_with_df,
@@ -1783,6 +1949,7 @@ REGLAS IMPORTANTES:
 2. NO crees ni simules nuevos DataFrames ni datos de ejemplo
 3. Para gráficos, guarda en './outputs/' y usa plt.show()
 4. Si trabajas con columnas de tiempo, verifica su tipo primero
+5. NO generes comentarios, Type hints o anotaciones en el código. Responde SOLO con código Python ejecutable, sin explicaciones ni markdown
 
 TAREA: {query}
 """
@@ -1798,8 +1965,26 @@ Código: {attempt.get('code', 'N/A')}
 Error: {attempt['error']} (Tipo: {attempt['error_type']})
 """
         
-    base_prompt += "\n⚠️ IMPORTANTE: Analiza los errores anteriores y genera un código DIFERENTE que los evite. Solo genera un gráfico UNICAMENTE si el usuario lo pide.\n"
-    base_prompt += "\nResponde SOLO con código Python ejecutable, sin explicaciones ni markdown:"
+    base_prompt += """
+
+REGLAS CRÍTICAS DE FORMATO:
+1. NO definas funciones - escribe código directo
+2. NO uses if __name__ == '__main__'
+3. NO incluyas comentarios sobre cargar datos
+4. El DataFrame 'df' YA ESTÁ DISPONIBLE
+5. Todos los módulos (pd, plt, sns, os) YA ESTÁN IMPORTADOS
+
+CÓDIGO DEBE SER EJECUTABLE DIRECTAMENTE, ejemplo:
+✅ CORRECTO:
+plt.figure(figsize=(10,6))
+df['columna'].hist()
+plt.show()
+
+❌ INCORRECTO:
+def plot_histogram(df):
+    plt.hist(df['columna'])
+plot_histogram(df)
+"""
     
     return base_prompt
 
@@ -2176,7 +2361,7 @@ def node_ejecutar_python(state: AgentState):
     print(f"⚙️ Ejecutando Python - Intento {state['iteration_count'] + 1}")
     
     # Asegurar que el dataset esté cargado
-    if not ensure_dataset_loaded():
+    if not ensure_dataset_loaded(state):
         state["success"] = False
         state["result"] = "Error: No se pudo cargar el dataset"
         return state
@@ -2281,21 +2466,117 @@ def node_validar_y_decidir_modificado(state: AgentState):
 
 def node_responder(state: AgentState):
     """
-    MODIFICADO: Ahora actualiza memoria con nueva información
+    MODIFICADO: Genera respuestas interpretativas con datos específicos obtenidos
     """
     success = state.get("success", False)
     
-    # Generar respuesta (código original)
     if success:
-        prompt = f"""
+        # Obtener información de la última ejecución exitosa
+        last_execution = None
+        if state["execution_history"]:
+            last_execution = state["execution_history"][-1]
+        
+        # Verificar si es una visualización
+        is_visualization = False
+        is_data_query = False
+        code_executed = ""
+        
+        if last_execution and last_execution["success"]:
+            code_executed = last_execution.get("code", "")
+            
+            # Detectar visualizaciones
+            is_visualization = any(keyword in code_executed.lower() for keyword in [
+                "plt.", "plot", "hist", "scatter", "bar", "show()", "savefig"
+            ])
+            
+            # Detectar consultas de datos (análisis, conteos, consultas SQL, etc.)
+            is_data_query = any(keyword in code_executed.lower() for keyword in [
+                "count", "sum", "mean", "describe", "value_counts", "groupby", "agg",
+                "select", "where", "group by", "order by", "len(", "shape", "info()",
+                "nunique", "unique", "max", "min", "std", "var"
+            ]) or state.get("sql_results") is not None
+        
+        if is_visualization:
+            # Para visualizaciones: comentar el resultado, NO mostrar código
+            prompt = f"""
+La consulta del usuario fue: {state['query']}
+
+Se ejecutó exitosamente código de visualización que generó un gráfico.
+
+CÓDIGO EJECUTADO (PARA CONTEXTO INTERNO - NO MOSTRAR AL USUARIO):
+{code_executed}
+
+RESULTADO OBTENIDO: {state['result']}
+
+Tu tarea es generar un comentario breve e interpretativo sobre lo que muestra el gráfico generado, SIN incluir código ni explicaciones técnicas.
+
+Enfócate en:
+1. Qué tipo de visualización se generó
+2. Qué información muestra al usuario
+3. Insights breves sobre los datos visualizados (si es posible inferirlos)
+4. Confirmar dónde se guardó el archivo
+
+NO incluyas código Python, explicaciones técnicas ni instrucciones.
+"""
+        
+        elif is_data_query or state.get("sql_results"):
+            # Para consultas que obtuvieron datos específicos
+            datos_obtenidos = ""
+            
+            # Extraer datos de resultados SQL si existen
+            if state.get("sql_results"):
+                sql_data = state["sql_results"]
+                if isinstance(sql_data, dict) and "data" in sql_data:
+                    datos_obtenidos = f"Datos SQL: {sql_data['data'][:3]}..."  # Primeros 3 registros
+                else:
+                    datos_obtenidos = f"Resultados SQL: {str(sql_data)[:200]}..."
+            
+            # O extraer del resultado de código Python
+            elif last_execution and last_execution.get("result"):
+                result_data = last_execution["result"]
+                if isinstance(result_data, str) and len(result_data) > 10:
+                    datos_obtenidos = result_data
+                else:
+                    datos_obtenidos = str(result_data)
+            
+            prompt = f"""
+La consulta del usuario fue: {state['query']}
+
+Se ejecutó exitosamente un análisis de datos que obtuvo información específica.
+
+DATOS OBTENIDOS:
+{datos_obtenidos}
+
+CÓDIGO EJECUTADO (PARA CONTEXTO INTERNO - NO MOSTRAR AL USUARIO):
+{code_executed}
+
+Tu tarea es generar una respuesta que:
+1. Confirme qué análisis se realizó
+2. INCLUYA los datos específicos obtenidos en la respuesta
+3. Interprete brevemente qué significan esos datos
+4. Sea clara y directa
+
+IMPORTANTE:
+- SÍ incluye los números, conteos, o datos específicos obtenidos
+- NO incluyas código Python
+- NO expliques cómo funciona el código
+- Enfócate en el resultado y su interpretación
+
+Ejemplo: "He analizado los datos y encontré que hay 1,247 registros en total, de los cuales 623 corresponden a la categoría X y 624 a la categoría Y, mostrando una distribución equilibrada."
+"""
+        
+        else:
+            # Para otros análisis: respuesta normal mejorada
+            prompt = f"""
 Pregunta del usuario: {state['query']}
 Resultado obtenido: {state['result']}
-Número de iteraciones necesarias: {state['iteration_count']}
+Iteraciones necesarias: {state['iteration_count']}
 Contexto histórico: {state.get('memory_summary', 'N/A')}
 
-Genera una respuesta clara y amigable en español, considerando conversaciones previas si las hay.
+Genera una respuesta clara sobre el análisis realizado, incluyendo cualquier dato específico que se haya obtenido.
 """
     else:
+        # Manejo de errores (código original)
         errors_summary = []
         for record in state["execution_history"]:
             if not record["success"]:
@@ -2309,16 +2590,13 @@ Contexto histórico: {state.get('memory_summary', 'N/A')}
 Errores encontrados:
 {chr(10).join(errors_summary)}
 
-Genera una respuesta empática considerando el historial, explicando:
-1. Que se intentó resolver múltiples veces
-2. Los problemas encontrados
-3. Sugerencias basadas en patrones previos si los hay
+Genera una respuesta empática explicando los problemas encontrados y sugerencias.
 """
 
     respuesta = llm.invoke(prompt).content
     print(f"\n🤖 Respuesta Final:\n{respuesta}")
     
-    # PASO 6B: Actualizar memoria con nueva información
+    # Resto del código original para actualizar memoria
     conversation_record = {
         "timestamp": datetime.now().isoformat(),
         "query": state["query"],
@@ -2330,23 +2608,17 @@ Genera una respuesta empática considerando el historial, explicando:
         "response": respuesta
     }
     
-    # Agregar a historial de conversaciones
     if not state.get("conversation_history"):
         state["conversation_history"] = []
     state["conversation_history"].append(conversation_record)
     
-    # Actualizar contexto del usuario
     update_user_context(state, conversation_record)
-    
-    # Actualizar patrones aprendidos
     update_learned_patterns(state, conversation_record)
     
     print("💾 Memoria actualizada con nueva conversación")
 
-    # Limpiar estado para serialización
     cleaned_state = clean_state_for_serialization(state)
     
-    # Actualizar el estado con la versión limpia
     for key, value in cleaned_state.items():
         state[key] = value
     
@@ -2754,4 +3026,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

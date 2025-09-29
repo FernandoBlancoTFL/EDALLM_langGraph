@@ -6,9 +6,27 @@ class AgentState(TypedDict):
     result: Any
     thought: str
     history: List[str]
-    execution_history: List[dict]  # Nuevo: historial detallado de ejecuciones
-    iteration_count: int           # Nuevo: contador de iteraciones
-    max_iterations: int           # Nuevo: límite de iteraciones
-    df_info: dict                 # Nuevo: información cached del DataFrame
-    success: bool                 # Nuevo: flag de éxito
-    final_error: Optional[str]    # Nuevo: error final si no se pudo resolver
+    execution_history: List[dict]
+    iteration_count: int
+    max_iterations: int
+    df_info: dict
+    success: bool
+    final_error: Optional[str]
+    available_datasets: dict
+    selected_dataset: str
+    active_dataframe: str
+    dataset_context: dict
+    data_strategy: str
+    sql_feasible: bool
+    table_metadata: dict
+    strategy_history: List[str]
+    sql_results: Any
+    strategy_switched: bool
+    needs_fallback: bool
+    strategy_reason: str
+    sql_error: Optional[str]
+    conversation_history: List[dict]
+    user_context: dict
+    memory_summary: str
+    learned_patterns: List[str]
+    session_metadata: dict

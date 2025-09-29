@@ -1,25 +1,34 @@
 import os
-import pandas as pd
 from dotenv import load_dotenv
-from langchain_google_genai import ChatGoogleGenerativeAI
-# from langchain_ollama import ChatOllama  # Descomentar si quieres usar Ollama también
 
-# ======================
-# Configuración inicial
-# ======================
-load_dotenv()  # Cargar variables de entorno (.env debe contener GOOGLE_API_KEY)
-api_key = os.getenv("GOOGLE_API_KEY")
+load_dotenv()
 
-os.makedirs("./outputs", exist_ok=True)  # Crear carpeta para guardar gráficos si no existe
+# Configuración principal
+ENABLE_AUTO_SAVE_TO_DB = False
+SINGLE_USER_THREAD_ID = "single_user_persistent_thread"
+SINGLE_USER_ID = "default_user"
 
-# Cargar dataset con pandas
-df = pd.read_excel("./data/ncr_ride_bookings.xlsx")
+# Configuración de datasets
+DATASETS_TO_PROCESS = [
+    {
+        "excel_path": "./src/data/ncr_ride_bookings.xlsx",
+        "table_name": "dataset_rides",
+        "table_schema": "public"
+    },
+    {
+        "excel_path": "./src/data/crocodile_dataset.xlsx",
+        "table_name": "crocodile_dataset", 
+        "table_schema": "public"
+    }
+]
 
-# Inicializar LLM
-llm = ChatGoogleGenerativeAI(
-    model="gemini-1.5-flash",
-    google_api_key=api_key,
-    temperature=0
-)
-# Alternativa con Ollama:
-# llm = ChatOllama(model="gemma3", temperature=0)
+DATASET_CONFIG = DATASETS_TO_PROCESS[0]
+
+# Configuración de API y directorios
+API_KEY = os.getenv("GOOGLE_API_KEY")
+
+# Suprimir warnings de Google Cloud
+import warnings
+warnings.filterwarnings('ignore', message='.*ALTS.*')
+os.environ['GRPC_VERBOSITY'] = 'ERROR'
+os.environ['GRPC_TRACE'] = ''
