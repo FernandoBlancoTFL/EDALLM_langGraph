@@ -13,7 +13,6 @@ from database import create_database_if_not_exists, test_target_database_connect
 def main():
     global postgres_saver
     
-    # AGREGAR ESTAS LÍNEAS ANTES DE PostgresSaver:
     print("🚀 Inicializando sistema de análisis de datos...")
     if not create_database_if_not_exists():
         print("❌ No se pudo crear o acceder a la base de datos. Terminando aplicación.")
@@ -27,12 +26,11 @@ def main():
     # Configurar sistema de conexión de datos
     setup_data_connection()
 
-    # AGREGAR ESTA LÍNEA:
     print("🔄 Inicializando sistema de dataset...")
     if not initialize_dataset_on_startup():
         print("⚠️ Advertencia: Error en inicialización del dataset, continuando con funcionalidad limitada")
     
-    # AHORA SÍ configurar PostgresSaver (después de que existe la BD)
+    # configurar PostgresSaver (después de que existe la BD)
     postgres_saver = setup_postgres_saver()
     
     app = create_graph_with_sql()
@@ -41,12 +39,12 @@ def main():
     print(f"💾 Guardado automático a BD: {'ACTIVADO' if ENABLE_AUTO_SAVE_TO_DB else 'DESACTIVADO'}")
     print(f"🧠 Memoria conversacional: {'ACTIVADA' if postgres_saver else 'DESACTIVADA'}")
     
-    # CORREGIDO: Thread ID automático para usuario único
+    # Thread ID automático para usuario único
     thread_id = get_automatic_thread_id()
     
     print("🚀 Sistema de Análisis de Datos con Memoria Persistente")
-    print("   Memoria automática activada para usuario único")
-    print("   Dataset se cargará al hacer la primera consulta")
+    # print("   Memoria automática activada para usuario único")
+    # print("   Dataset se cargará al hacer la primera consulta")
     print("   Escribe 'salir' para terminar\n")
     
     # Mostrar archivos almacenados
@@ -109,7 +107,7 @@ def main():
         print(f"{'='*60}")
         
         try:
-            # CORREGIDO: Configurar thread automático para memoria persistente
+            # Configurar thread automático para memoria persistente
             config = {"configurable": {"thread_id": thread_id}} if postgres_saver else {}
             
             # Invocar con configuración de thread

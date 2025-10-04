@@ -233,9 +233,10 @@ def list_stored_tables(connection=None):
         if temp_connection:
             conn.close()
 
-def create_dataset_table_from_df(df: pd.DataFrame, connection=None, table_name=None, table_schema=None):
+def create_dataset_table_from_df(df: pd.DataFrame, connection=None, table_name=None, table_schema=None, semantic_description=None):
     """
     Crea una tabla en PostgreSQL desde un DataFrame.
+    MODIFICADO: Ahora incluye descripción semántica en metadatos.
     """
     conn = connection
     
@@ -285,19 +286,34 @@ def create_dataset_table_from_df(df: pd.DataFrame, connection=None, table_name=N
                 column_definitions.append(f'"{clean_col}" {postgres_type}')
                 print(f"   {original_col} -> {clean_col} ({pandas_type} -> {postgres_type})")
             
-            # Crear tabla
+            # Crear tabla CON columna de descripción semántica
             create_table_sql = f"""
                 CREATE TABLE {table_schema}.{table_name} (
                     id SERIAL PRIMARY KEY,
                     {', '.join(column_definitions)},
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    semantic_description TEXT
                 )
             """
             
             cursor.execute(create_table_sql)
+            
+            # Si se proporcionó descripción, agregarla como comentario de tabla
+            # CORREGIDO: Usar f-string en lugar de placeholder para DDL
+            if semantic_description:
+                # Escapar comillas simples en la descripción
+                escaped_description = semantic_description.replace("'", "''")
+                comment_sql = f"""
+                    COMMENT ON TABLE {table_schema}.{table_name} IS '{escaped_description}'
+                """
+                cursor.execute(comment_sql)
+            
             conn.commit()
             
             print(f"✅ Tabla '{table_name}' creada exitosamente")
+            if semantic_description:
+                print(f"🧠 Descripción semántica almacenada")
+            
             return True, column_mapping
             
     except Exception as e:
@@ -306,9 +322,10 @@ def create_dataset_table_from_df(df: pd.DataFrame, connection=None, table_name=N
             conn.rollback()
         return False, {}
 
-def insert_dataframe_to_table(df: pd.DataFrame, column_mapping: dict, connection=None, table_name=None, table_schema=None):
+def insert_dataframe_to_table(df: pd.DataFrame, column_mapping: dict, connection=None, table_name=None, table_schema=None, semantic_description=None):
     """
     Inserta los datos del DataFrame en la tabla PostgreSQL.
+    MODIFICADO: Ahora inserta la descripción semántica en cada fila.
     """
     conn = connection
     
@@ -326,9 +343,14 @@ def insert_dataframe_to_table(df: pd.DataFrame, column_mapping: dict, connection
         
         print(f"📥 Insertando {len(df_clean)} filas en la tabla '{table_name}'...")
         
-        # Preparar datos para inserción
+        # Preparar datos para inserción (con descripción semántica)
         columns_list = list(column_mapping.values())
-        placeholders = ', '.join(['%s'] * len(columns_list))
+        if semantic_description:
+            columns_list.append('semantic_description')
+            placeholders = ', '.join(['%s'] * (len(columns_list)))
+        else:
+            placeholders = ', '.join(['%s'] * len(columns_list))
+        
         columns_str = ', '.join([f'"{col}"' for col in columns_list])
         
         insert_sql = f"""
@@ -340,7 +362,7 @@ def insert_dataframe_to_table(df: pd.DataFrame, column_mapping: dict, connection
         data_rows = []
         for _, row in df_clean.iterrows():
             row_data = []
-            for col in columns_list:
+            for col in column_mapping.values():
                 value = row[col]
                 if pd.isna(value):
                     row_data.append(None)
@@ -348,6 +370,11 @@ def insert_dataframe_to_table(df: pd.DataFrame, column_mapping: dict, connection
                     row_data.append(value.to_pydatetime() if hasattr(value, 'to_pydatetime') else str(value))
                 else:
                     row_data.append(value)
+            
+            # Agregar descripción semántica al final de cada fila
+            if semantic_description:
+                row_data.append(semantic_description)
+            
             data_rows.append(tuple(row_data))
         
         # Inserción por lotes
@@ -432,10 +459,73 @@ def load_excel_to_postgres(connection=None, force_load=False):
         print(f"❌ Error procesando Excel: {e}")
         return None, False
 
+def generate_semantic_description_with_llm(df: pd.DataFrame, table_name: str, excel_path: str) -> str:
+    """
+    Genera una descripción semántica del dataset usando LLM.
+    Analiza estructura, contenido y propósito del dataset.
+    """
+    from nodes import llm
+
+    try:
+        # Obtener muestra de datos (primeras 5 filas)
+        sample_data = df.head(5).to_string()
+        
+        # Información estructural
+        columns_info = ", ".join(df.columns.tolist())
+        dtypes_info = df.dtypes.to_string()
+        row_count = len(df)
+        
+        # Estadísticas básicas para columnas numéricas
+        numeric_stats = ""
+        numeric_cols = df.select_dtypes(include=['number']).columns
+        if len(numeric_cols) > 0:
+            numeric_stats = df[numeric_cols].describe().to_string()
+        
+        prompt = f"""
+Analiza este dataset y genera una descripción semántica clara y concisa.
+
+INFORMACIÓN DEL DATASET:
+- Nombre de archivo: {os.path.basename(excel_path)}
+- Nombre de tabla: {table_name}
+- Cantidad de filas: {row_count}
+- Columnas ({len(df.columns)}): {columns_info}
+
+TIPOS DE DATOS:
+{dtypes_info}
+
+MUESTRA DE DATOS (primeras 5 filas):
+{sample_data}
+
+{f"ESTADÍSTICAS NUMÉRICAS:{numeric_stats}" if numeric_stats else ""}
+
+TAREA:
+Genera una descripción semántica de 2-3 oraciones que explique:
+1. Qué tipo de datos contiene este dataset
+2. Para qué análisis o consultas podría ser útil
+3. Características principales (temporal, geográfico, transaccional, etc.)
+
+La descripción debe ser clara, directa y útil para que un LLM pueda decidir si este dataset es relevante para una consulta de usuario.
+
+Responde SOLO con la descripción, sin formato adicional.
+"""
+        
+        response = llm.invoke(prompt).content.strip()
+        
+        print(f"📝 Descripción generada para '{table_name}':")
+        print(f"   {response[:150]}...")
+        
+        return response
+        
+    except Exception as e:
+        print(f"⚠️ Error generando descripción semántica: {e}")
+        # Fallback a descripción básica
+        return f"Dataset con {len(df.columns)} columnas y {len(df)} filas. Columnas principales: {', '.join(df.columns.tolist()[:5])}"
+
 def initialize_dataset_on_startup():
     """
     Inicializa todos los datasets en BD SOLO si ENABLE_AUTO_SAVE_TO_DB es True.
     Se ejecuta automáticamente al iniciar el programa.
+    MODIFICADO: Ahora genera descripciones semánticas automáticamente.
     """
     global ENABLE_AUTO_SAVE_TO_DB
     
@@ -482,14 +572,31 @@ def initialize_dataset_on_startup():
             print(f"📂 Cargando Excel para crear tabla en BD...")
             df_temp = pd.read_excel(excel_path)
             
-            # Crear tabla
-            success, column_mapping = create_dataset_table_from_df(df_temp, dataset_connection, table_name, table_schema)
+            # 🧠 NUEVO: Generar descripción semántica con LLM
+            print(f"🤖 Generando descripción semántica con LLM...")
+            semantic_description = generate_semantic_description_with_llm(df_temp, table_name, excel_path)
+            
+            # Crear tabla con descripción semántica
+            success, column_mapping = create_dataset_table_from_df(
+                df_temp, 
+                dataset_connection, 
+                table_name, 
+                table_schema,
+                semantic_description=semantic_description
+            )
             if not success:
                 print(f"❌ No se pudo crear la tabla {table_name}")
                 continue
             
-            # Insertar datos
-            insert_success = insert_dataframe_to_table(df_temp, column_mapping, dataset_connection, table_name, table_schema)
+            # Insertar datos (incluyendo descripción en la primera fila si es necesario)
+            insert_success = insert_dataframe_to_table(
+                df_temp, 
+                column_mapping, 
+                dataset_connection, 
+                table_name, 
+                table_schema,
+                semantic_description=semantic_description
+            )
             if insert_success:
                 print(f"✅ Dataset '{table_name}' inicializado correctamente en BD")
                 success_count += 1

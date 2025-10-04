@@ -1,7 +1,9 @@
 import os
 import pandas as pd
+import psycopg
 from typing import Any
 from dataset_manager import list_stored_tables, get_dataset_table_info_by_name
+from database import load_db_config
 from config import DATASETS_TO_PROCESS
 
 def get_all_available_datasets(connection=None):
@@ -147,6 +149,138 @@ def generate_dataset_keywords(table_name, columns):
     keywords.extend(list(set(col_keywords)))
     return keywords
 
+def get_semantic_descriptions_from_db(connection=None):
+    """
+    Recupera las descripciones semánticas de todas las tablas desde la BD.
+    Retorna un diccionario {table_name: semantic_description}
+    """
+    conn = connection
+    if conn is None:
+        try:
+            db_config = load_db_config()
+            connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+            conn = psycopg.connect(connection_string)
+            should_close = True
+        except Exception as e:
+            print(f"⚠️ Error conectando para obtener descripciones: {e}")
+            return {}
+    else:
+        should_close = False
+    
+    descriptions = {}
+    
+    try:
+        with conn.cursor() as cursor:
+            # Obtener todas las tablas que tienen columna semantic_description
+            stored_tables = list_stored_tables(conn)
+            
+            for table_name in stored_tables:
+                try:
+                    # Obtener la descripción desde la primera fila (todas tienen la misma)
+                    query = f"""
+                        SELECT semantic_description 
+                        FROM public.{table_name} 
+                        WHERE semantic_description IS NOT NULL 
+                        LIMIT 1
+                    """
+                    cursor.execute(query)
+                    result = cursor.fetchone()
+                    
+                    if result and result[0]:
+                        descriptions[table_name] = result[0]
+                        print(f"📖 Descripción recuperada para '{table_name}'")
+                except Exception as e:
+                    print(f"⚠️ Error obteniendo descripción de {table_name}: {e}")
+                    # Fallback: intentar obtener desde comentario de tabla
+                    try:
+                        comment_query = """
+                            SELECT obj_description(oid) 
+                            FROM pg_class 
+                            WHERE relname = %s AND relnamespace = 'public'::regnamespace
+                        """
+                        cursor.execute(comment_query, (table_name,))
+                        comment_result = cursor.fetchone()
+                        if comment_result and comment_result[0]:
+                            descriptions[table_name] = comment_result[0]
+                    except:
+                        pass
+        
+        return descriptions
+        
+    except Exception as e:
+        print(f"❌ Error general obteniendo descripciones semánticas: {e}")
+        return {}
+    finally:
+        if should_close and conn:
+            conn.close()
+
+def identify_dataset_with_llm(query: str, available_datasets: dict, semantic_descriptions: dict, user_context: dict) -> str:
+    """
+    Usa LLM para seleccionar el dataset más apropiado basándose en descripciones semánticas.
+    """
+    if not available_datasets:
+        print("⚠️ No hay datasets disponibles")
+        return None
+    
+    # Construir lista de datasets con sus descripciones
+    datasets_info = []
+    for table_name, info in available_datasets.items():
+        semantic_desc = semantic_descriptions.get(table_name, info.get("description", "Sin descripción"))
+        datasets_info.append(f"""
+Dataset: {table_name}
+Nombre amigable: {info.get('friendly_name', table_name)}
+Descripción: {semantic_desc}
+Columnas principales: {', '.join(info.get('main_columns', [])[:5])}
+Cantidad de filas: {info.get('row_count', 'N/A')}
+        """)
+    
+    # Considerar historial del usuario
+    common_datasets_info = ""
+    if user_context.get("common_datasets"):
+        common_datasets_info = f"\nDATASETS MÁS USADOS POR EL USUARIO: {', '.join(user_context['common_datasets'][:3])}"
+    
+    prompt = f"""
+Analiza la consulta del usuario y selecciona el dataset MÁS apropiado.
+
+CONSULTA DEL USUARIO:
+{query}
+{common_datasets_info}
+
+DATASETS DISPONIBLES:
+{chr(10).join(datasets_info)}
+
+INSTRUCCIONES:
+- Selecciona el dataset cuya descripción mejor coincida con la intención de la consulta
+- Considera el contexto semántico, no solo palabras clave exactas
+- Si el usuario menciona análisis previos, considera los datasets más usados
+- Si hay ambigüedad, elige el dataset más relevante semánticamente
+
+Responde SOLO con el nombre exacto de la tabla (table_name), sin explicaciones adicionales.
+Ejemplo de respuesta válida: dataset_rides
+"""
+    
+    try:
+        from nodes import llm
+        response = llm.invoke(prompt).content.strip()
+        
+        # Limpiar respuesta (puede venir con comillas, espacios, etc.)
+        selected = response.replace('"', '').replace("'", "").strip()
+        
+        # Verificar que la respuesta sea válida
+        if selected in available_datasets:
+            print(f"🤖 LLM seleccionó dataset: {selected}")
+            print(f"   Razón: Mejor coincidencia semántica con la consulta")
+            return selected
+        else:
+            print(f"⚠️ LLM respondió con dataset inválido: {selected}")
+            print(f"   Fallback: usando primer dataset disponible")
+            return list(available_datasets.keys())[0]
+            
+    except Exception as e:
+        print(f"❌ Error en selección con LLM: {e}")
+        # Fallback a método tradicional
+        return identify_dataset_from_query(query, available_datasets)
+
 def identify_dataset_from_query(query: str, available_datasets: dict) -> str:
     """
     Identifica qué dataset es más relevante basándose en la consulta del usuario.
@@ -196,21 +330,34 @@ def identify_dataset_from_query(query: str, available_datasets: dict) -> str:
 
 def identify_dataset_from_query_with_memory(query: str, available_datasets: dict, user_context: dict) -> str:
     """
-    Versión mejorada que considera el historial del usuario.
+    Versión mejorada que usa LLM con descripciones semánticas.
+    MODIFICADO: Ahora prioriza selección por LLM usando descripciones semánticas.
     """
-    # Usar la función original como base
-    base_result = identify_dataset_from_query(query, available_datasets)
+    if not available_datasets:
+        return None
     
-    # Considerar datasets comunes del usuario
-    common_datasets = user_context.get("common_datasets", [])
-    if common_datasets and base_result in common_datasets:
-        print(f"✅ Dataset confirmado por historial: {base_result}")
+    # Obtener descripciones semánticas de la BD
+    semantic_descriptions = get_semantic_descriptions_from_db()
+    
+    # Si hay descripciones semánticas disponibles, usar LLM para selección inteligente
+    if semantic_descriptions:
+        print("🧠 Usando LLM para selección de dataset (basado en descripciones semánticas)")
+        return identify_dataset_with_llm(query, available_datasets, semantic_descriptions, user_context)
+    else:
+        print("⚠️ No se encontraron descripciones semánticas, usando método tradicional")
+        # Fallback al método original
+        base_result = identify_dataset_from_query(query, available_datasets)
+        
+        # Considerar datasets comunes del usuario
+        common_datasets = user_context.get("common_datasets", [])
+        if common_datasets and base_result in common_datasets:
+            print(f"✅ Dataset confirmado por historial: {base_result}")
+            return base_result
+        
+        # Si hay ambigüedad, preferir el dataset más usado históricamente
+        if not base_result and common_datasets:
+            preferred = common_datasets[0]
+            print(f"🔄 Usando dataset preferido por historial: {preferred}")
+            return preferred
+        
         return base_result
-    
-    # Si hay ambigüedad, preferir el dataset más usado históricamente
-    if not base_result and common_datasets:
-        preferred = common_datasets[0]  # El más usado
-        print(f"🔄 Usando dataset preferido por historial: {preferred}")
-        return preferred
-    
-    return base_result
