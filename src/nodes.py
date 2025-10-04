@@ -1,5 +1,6 @@
 import pandas as pd
 from langchain_google_genai import ChatGoogleGenerativeAI
+# from langchain_ollama import ChatOllama
 from datetime import datetime
 from state import AgentState
 from config import API_KEY, SINGLE_USER_THREAD_ID
@@ -17,6 +18,7 @@ import dataset_manager
 
 # Inicializar LLM
 llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", google_api_key=API_KEY, temperature=0)
+# llm = ChatOllama(model="gemma3", temperature=0)
 
 def nodo_estrategia_datos(state: AgentState):
     """
@@ -24,7 +26,7 @@ def nodo_estrategia_datos(state: AgentState):
     """
     print("🧠 Iniciando análisis con recuperación de memoria...")
     
-    # PASO 6A: Recuperar historial desde PostgresSaver - CORREGIDO
+    # Recuperar historial desde PostgresSaver
     if not state.get("conversation_history"):
         # Intentar cargar desde PostgresSaver usando el thread_id
         thread_id = state.get("session_metadata", {}).get("thread_id", SINGLE_USER_THREAD_ID)
@@ -53,7 +55,7 @@ def nodo_estrategia_datos(state: AgentState):
         state["memory_summary"] = "Primera conversación con el usuario"
         print("🆕 Primera interacción - sin historial previo")
     
-    # NUEVO: Detectar consultas sobre memoria ANTES de analizar estrategia
+    # Detectar si la consulta es sobre memoria ANTES de analizar estrategia
     if is_memory_query(state["query"]):
         print("🧠 Consulta sobre memoria detectada - respuesta directa")
         state["data_strategy"] = "memory"
@@ -63,14 +65,13 @@ def nodo_estrategia_datos(state: AgentState):
         state["history"].append(f"Memoria → Respuesta directa sobre historial")
         return state
     
-    # Resto del código original para consultas normales...
     print("🔍 Analizando estrategia de acceso a datos...")
     
     if not state.get("available_datasets"):
         state["available_datasets"] = get_all_available_datasets()
     
     if not state.get("selected_dataset"):
-        # MEJORADO: Usar contexto histórico para selección de dataset
+        # Usar contexto histórico para selección de dataset
         selected_dataset = identify_dataset_from_query_with_memory(
             state["query"], 
             state["available_datasets"],
@@ -80,47 +81,47 @@ def nodo_estrategia_datos(state: AgentState):
             state["selected_dataset"] = selected_dataset
             state["dataset_context"] = state["available_datasets"][selected_dataset]
     
-    # Obtener metadatos y analizar estrategia (código original)
+    # Obtener metadatos y analizar estrategia
     table_metadata = get_table_metadata_light(state["selected_dataset"])
     state["table_metadata"] = table_metadata
     
     # Analizar consulta con contexto histórico
     strategy_prompt = f"""
-Analiza esta consulta considerando el historial del usuario:
+        Analiza esta consulta considerando el historial del usuario:
 
-CONSULTA ACTUAL: {state['query']}
-MEMORIA DEL USUARIO: {state['memory_summary']}
-CONTEXTO HISTÓRICO: {state['user_context']}
+        CONSULTA ACTUAL: {state['query']}
+        MEMORIA DEL USUARIO: {state['memory_summary']}
+        CONTEXTO HISTÓRICO: {state['user_context']}
 
-METADATOS DE TABLA DISPONIBLE:
-- Tabla: {state['selected_dataset']}
-- Columnas: {table_metadata.get('columns', [])[:10]}
-- Filas estimadas: {table_metadata.get('row_count', 'N/A')}
+        METADATOS DE TABLA DISPONIBLE:
+        - Tabla: {state['selected_dataset']}
+        - Columnas: {table_metadata.get('columns', [])[:10]}
+        - Filas estimadas: {table_metadata.get('row_count', 'N/A')}
 
-PATRONES APRENDIDOS:
-{', '.join(state.get('learned_patterns', []))}
+        PATRONES APRENDIDOS:
+        {', '.join(state.get('learned_patterns', []))}
 
-CRITERIOS PARA SQL:
-- Consultas de conteo simple
-- Filtros básicos
-- Agregaciones simples
-- Consultas similares a las exitosas anteriormente
+        CRITERIOS PARA SQL:
+        - Consultas de conteo simple
+        - Filtros básicos
+        - Agregaciones simples
+        - Consultas similares a las exitosas anteriormente
 
-CRITERIOS PARA DATAFRAME:
-- Análisis estadísticos complejos
-- Visualizaciones (considerando preferencias previas)
-- Análisis avanzados
-- Si el usuario ha tenido problemas con SQL antes
+        CRITERIOS PARA DATAFRAME:
+        - Análisis estadísticos complejos
+        - Visualizaciones (considerando preferencias previas)
+        - Análisis avanzados
+        - Si el usuario ha tenido problemas con SQL antes
 
-Responde:
-Strategy: sql|dataframe
-Reason: <explicación considerando el historial>
-SQL_Feasible: true|false
-"""
+        Responde:
+        Strategy: sql|dataframe
+        Reason: <explicación considerando el historial>
+        SQL_Feasible: true|false
+    """
     
     response = llm.invoke(strategy_prompt).content.strip()
     
-    # Extraer decisión (código original)
+    # Extraer decisión
     strategy = "dataframe"
     sql_feasible = False
     reason = ""
@@ -138,17 +139,24 @@ SQL_Feasible: true|false
     state["strategy_reason"] = reason
     
     print(f"📊 Estrategia seleccionada: {strategy.upper()}")
-    print(f"🔍 Razón (con memoria): {reason}")
+    print(f"🔍 Razón (usando memoria): {reason}")
     
     state["history"].append(f"Estrategia → {strategy.upper()} - {reason}")
     
     return state
 
 def node_clasificar_modificado(state: AgentState):
-    """MODIFICADO: Se enfoca solo en dataset selection y tool selection"""
+    """Se enfoca solo en dataset selection y tool selection"""
     
     # La estrategia ya fue definida por nodo_estrategia_datos
     data_strategy = state.get("data_strategy", "dataframe")
+    
+    if data_strategy == "memory":
+        state["thought"] = "Consulta de memoria - no requiere procesamiento de datos"
+        state["action"] = "memory_query"
+        state["history"].append("Clasificar (Mod) → Memory Query (skip LLM)")
+        return state
+    
     selected_dataset = state.get("selected_dataset")
     
     print(f"🎯 Clasificando con estrategia: {data_strategy.upper()}")
@@ -157,37 +165,37 @@ def node_clasificar_modificado(state: AgentState):
     # Seleccionar herramientas según estrategia
     if data_strategy == "sql":
         tools_context = """
-HERRAMIENTAS DISPONIBLES (Modo SQL):
-- SQL_Executor: Ejecuta consultas SQL directas en la base de datos
-- Herramientas básicas de metadatos si SQL no es suficiente
-"""
+            HERRAMIENTAS DISPONIBLES (Modo SQL):
+            - SQL_Executor: Ejecuta consultas SQL directas en la base de datos
+            - Herramientas básicas de metadatos si SQL no es suficiente
+        """
         recommended_action = "SQL_Executor"
     else:
         tools_context = f"""
-HERRAMIENTAS DISPONIBLES (Modo DataFrame):
-{get_tools_summary(tools)}
-"""
+            HERRAMIENTAS DISPONIBLES (Modo DataFrame):
+            {get_tools_summary(tools)}
+        """
         recommended_action = "Python_Interpreter"
     
     prompt = f"""
-Analiza esta consulta para seleccionar la herramienta más apropiada:
+        Analiza esta consulta para seleccionar la herramienta más apropiada:
 
-CONSULTA: {state['query']}
-ESTRATEGIA DEFINIDA: {data_strategy.upper()}
-DATASET: {state.get('dataset_context', {}).get('friendly_name', 'N/A')}
+        CONSULTA: {state['query']}
+        ESTRATEGIA DEFINIDA: {data_strategy.upper()}
+        DATASET: {state.get('dataset_context', {}).get('friendly_name', 'N/A')}
 
-{tools_context}
+        {tools_context}
 
-INSTRUCCIONES:
-- La estrategia de datos ya fue decidida por el nodo anterior
-- Selecciona la herramienta MÁS específica para esta consulta
-- Si la estrategia es SQL, prioriza SQL_Executor salvo que sea inadecuado
-- Si la estrategia es DataFrame, usa las herramientas especializadas o Python_Interpreter
+        INSTRUCCIONES:
+        - La estrategia de datos ya fue decidida por el nodo anterior
+        - Selecciona la herramienta MÁS específica para esta consulta
+        - Si la estrategia es SQL, prioriza SQL_Executor salvo que sea inadecuado
+        - Si la estrategia es DataFrame, usa las herramientas especializadas o Python_Interpreter
 
-Responde:
-Thought: <análisis de la consulta y selección de herramienta>
-Action: <nombre exacto de la herramienta>
-"""
+        Responde:
+        Thought: <análisis de la consulta y selección de herramienta>
+        Action: <nombre exacto de la herramienta>
+    """
 
     response = llm.invoke(prompt).content.strip()
     
@@ -234,30 +242,30 @@ def nodo_sql_executor(state: AgentState):
     
     # Generar consulta SQL
     sql_prompt = f"""
-Genera una consulta SQL para resolver esta petición:
+        Genera una consulta SQL para resolver esta petición:
 
-CONSULTA: {state['query']}
+        CONSULTA: {state['query']}
 
-INFORMACIÓN DE TABLA:
-- Tabla: {state['selected_dataset']}
-- Esquema: public
-- Columnas disponibles: {state.get('table_metadata', {}).get('columns', [])}
+        INFORMACIÓN DE TABLA:
+        - Tabla: {state['selected_dataset']}
+        - Esquema: public
+        - Columnas disponibles: {state.get('table_metadata', {}).get('columns', [])}
 
-REGLAS:
-1. Usa SOLO la tabla: public.{state['selected_dataset']}
-2. Usa comillas dobles para nombres de columnas si tienen espacios
-3. Limita resultados a máximo 100 filas si no se especifica
-4. Para agregaciones, usa funciones SQL estándar (COUNT, SUM, AVG, etc.)
-5. Si hay fechas, asume formato TIMESTAMP
-6. NO uses funciones específicas de PostgreSQL complejas
+        REGLAS:
+        1. Usa SOLO la tabla: public.{state['selected_dataset']}
+        2. Usa comillas dobles para nombres de columnas si tienen espacios
+        3. Limita resultados a máximo 100 filas si no se especifica
+        4. Para agregaciones, usa funciones SQL estándar (COUNT, SUM, AVG, etc.)
+        5. Si hay fechas, asume formato TIMESTAMP
+        6. NO uses funciones específicas de PostgreSQL complejas
 
-EJEMPLOS:
-- Conteo: SELECT COUNT(*) FROM public.{state['selected_dataset']}
-- Top 10: SELECT * FROM public.{state['selected_dataset']} LIMIT 10
-- Agregación: SELECT "Payment Method", COUNT(*) FROM public.{state['selected_dataset']} GROUP BY "Payment Method"
+        EJEMPLOS:
+        - Conteo: SELECT COUNT(*) FROM public.{state['selected_dataset']}
+        - Top 10: SELECT * FROM public.{state['selected_dataset']} LIMIT 10
+        - Agregación: SELECT "Payment Method", COUNT(*) FROM public.{state['selected_dataset']} GROUP BY "Payment Method"
 
-Responde SOLO con la consulta SQL, sin explicaciones:
-"""
+        Responde SOLO con la consulta SQL, sin explicaciones:
+    """
     
     try:
         sql_query = llm.invoke(sql_prompt).content.strip()
@@ -407,7 +415,7 @@ def node_ejecutar_python(state: AgentState):
     return state
 
 def node_validar_y_decidir_modificado(state: AgentState):
-    """MODIFICADO: Maneja fallbacks entre SQL y DataFrame"""
+    """Maneja fallbacks entre SQL y DataFrame"""
     
     state["iteration_count"] += 1
     success = state.get("success", False)
@@ -449,7 +457,7 @@ def node_validar_y_decidir_modificado(state: AgentState):
 
 def node_responder(state: AgentState):
     """
-    MODIFICADO: Genera respuestas interpretativas con datos específicos obtenidos
+    Genera respuestas interpretativas con datos específicos obtenidos
     """
     success = state.get("success", False)
     
@@ -482,25 +490,25 @@ def node_responder(state: AgentState):
         if is_visualization:
             # Para visualizaciones: comentar el resultado, NO mostrar código
             prompt = f"""
-La consulta del usuario fue: {state['query']}
+                La consulta del usuario fue: {state['query']}
 
-Se ejecutó exitosamente código de visualización que generó un gráfico.
+                Se ejecutó exitosamente código de visualización que generó un gráfico.
 
-CÓDIGO EJECUTADO (PARA CONTEXTO INTERNO - NO MOSTRAR AL USUARIO):
-{code_executed}
+                CÓDIGO EJECUTADO (PARA CONTEXTO INTERNO - NO MOSTRAR AL USUARIO):
+                {code_executed}
 
-RESULTADO OBTENIDO: {state['result']}
+                RESULTADO OBTENIDO: {state['result']}
 
-Tu tarea es generar un comentario breve e interpretativo sobre lo que muestra el gráfico generado, SIN incluir código ni explicaciones técnicas.
+                Tu tarea es generar un comentario breve e interpretativo sobre lo que muestra el gráfico generado, SIN incluir código ni explicaciones técnicas.
 
-Enfócate en:
-1. Qué tipo de visualización se generó
-2. Qué información muestra al usuario
-3. Insights breves sobre los datos visualizados (si es posible inferirlos)
-4. Confirmar dónde se guardó el archivo
+                Enfócate en:
+                1. Qué tipo de visualización se generó
+                2. Qué información muestra al usuario
+                3. Insights breves sobre los datos visualizados (si es posible inferirlos)
+                4. Confirmar dónde se guardó el archivo
 
-NO incluyas código Python, explicaciones técnicas ni instrucciones.
-"""
+                NO incluyas código Python, explicaciones técnicas ni instrucciones.
+            """
         
         elif is_data_query or state.get("sql_results"):
             # Para consultas que obtuvieron datos específicos
@@ -523,41 +531,41 @@ NO incluyas código Python, explicaciones técnicas ni instrucciones.
                     datos_obtenidos = str(result_data)
             
             prompt = f"""
-La consulta del usuario fue: {state['query']}
+                La consulta del usuario fue: {state['query']}
 
-Se ejecutó exitosamente un análisis de datos que obtuvo información específica.
+                Se ejecutó exitosamente un análisis de datos que obtuvo información específica.
 
-DATOS OBTENIDOS:
-{datos_obtenidos}
+                DATOS OBTENIDOS:
+                {datos_obtenidos}
 
-CÓDIGO EJECUTADO (PARA CONTEXTO INTERNO - NO MOSTRAR AL USUARIO):
-{code_executed}
+                CÓDIGO EJECUTADO (PARA CONTEXTO INTERNO - NO MOSTRAR AL USUARIO):
+                {code_executed}
 
-Tu tarea es generar una respuesta que:
-1. Confirme qué análisis se realizó
-2. INCLUYA los datos específicos obtenidos en la respuesta
-3. Interprete brevemente qué significan esos datos
-4. Sea clara y directa
+                Tu tarea es generar una respuesta que:
+                1. Confirme qué análisis se realizó
+                2. INCLUYA los datos específicos obtenidos en la respuesta
+                3. Interprete brevemente qué significan esos datos
+                4. Sea clara y directa
 
-IMPORTANTE:
-- SÍ incluye los números, conteos, o datos específicos obtenidos
-- NO incluyas código Python
-- NO expliques cómo funciona el código
-- Enfócate en el resultado y su interpretación
+                IMPORTANTE:
+                - SÍ incluye los números, conteos, o datos específicos obtenidos
+                - NO incluyas código Python
+                - NO expliques cómo funciona el código
+                - Enfócate en el resultado y su interpretación
 
-Ejemplo: "He analizado los datos y encontré que hay 1,247 registros en total, de los cuales 623 corresponden a la categoría X y 624 a la categoría Y, mostrando una distribución equilibrada."
-"""
+                Ejemplo: "He analizado los datos y encontré que hay 1,247 registros en total, de los cuales 623 corresponden a la categoría X y 624 a la categoría Y, mostrando una distribución equilibrada."
+            """
         
         else:
             # Para otros análisis: respuesta normal mejorada
             prompt = f"""
-Pregunta del usuario: {state['query']}
-Resultado obtenido: {state['result']}
-Iteraciones necesarias: {state['iteration_count']}
-Contexto histórico: {state.get('memory_summary', 'N/A')}
+                Pregunta del usuario: {state['query']}
+                Resultado obtenido: {state['result']}
+                Iteraciones necesarias: {state['iteration_count']}
+                Contexto histórico: {state.get('memory_summary', 'N/A')}
 
-Genera una respuesta clara sobre el análisis realizado, incluyendo cualquier dato específico que se haya obtenido.
-"""
+                Genera una respuesta clara sobre el análisis realizado, incluyendo cualquier dato específico que se haya obtenido.
+            """
     else:
         # Manejo de errores (código original)
         errors_summary = []
@@ -566,20 +574,20 @@ Genera una respuesta clara sobre el análisis realizado, incluyendo cualquier da
                 errors_summary.append(f"- {record['error_type']}: {record['error']}")
         
         prompt = f"""
-Pregunta del usuario: {state['query']}
-Después de {state['iteration_count']} iteraciones, no se pudo completar la tarea.
-Contexto histórico: {state.get('memory_summary', 'N/A')}
+            Pregunta del usuario: {state['query']}
+            Después de {state['iteration_count']} iteraciones, no se pudo completar la tarea.
+            Contexto histórico: {state.get('memory_summary', 'N/A')}
 
-Errores encontrados:
-{chr(10).join(errors_summary)}
+            Errores encontrados:
+            {chr(10).join(errors_summary)}
 
-Genera una respuesta empática explicando los problemas encontrados y sugerencias.
-"""
+            Genera una respuesta empática explicando los problemas encontrados y sugerencias.
+        """
 
     respuesta = llm.invoke(prompt).content
     print(f"\n🤖 Respuesta Final:\n{respuesta}")
     
-    # Resto del código original para actualizar memoria
+    # actualizar memoria
     conversation_record = {
         "timestamp": datetime.now().isoformat(),
         "query": state["query"],

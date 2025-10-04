@@ -620,7 +620,7 @@ def load_specific_dataset(table_name: str, connection=None):
     Carga un dataset específico en memoria.
     Retorna (df, dataset_info, success)
     """
-    global df, dataset_info, dataset_loaded  # MOVER ESTO AL INICIO
+    global df, dataset_info, dataset_loaded
     
     # Buscar configuración del dataset
     dataset_config = None

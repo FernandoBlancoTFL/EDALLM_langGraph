@@ -12,7 +12,7 @@ def route_after_classification(state: AgentState):
     print(f"   Action: {action}")
     print(f"   Strategy: {data_strategy}")
     
-    # NUEVO: Manejar consultas de memoria
+    # Manejar consultas de memoria
     if data_strategy == "memory":
         print("   → Routing to: responder (memoria)")
         return "responder"
@@ -26,18 +26,18 @@ def route_after_classification(state: AgentState):
         return "ejecutar_python"
 
 def route_after_validation_modificado(state: AgentState):
-    """Routing modificado que maneja fallbacks"""
+    """Routing que maneja fallbacks"""
     success = state.get("success", False)
     iteration_count = state.get("iteration_count", 0)
     max_iterations = state.get("max_iterations", 3)
     needs_fallback = state.get("needs_fallback", False)
     current_strategy = state.get("data_strategy", "dataframe")
     
-    print(f"\n🔧 DEBUG route_after_validation_modificado:")
-    print(f"   Success: {success}")
-    print(f"   Iteration: {iteration_count}")
-    print(f"   Strategy: {current_strategy}")
-    print(f"   Needs fallback: {needs_fallback}")
+    # print(f"\n🔧 DEBUG route_after_validation_modificado:")
+    # print(f"   Success: {success}")
+    # print(f"   Iteration: {iteration_count}")
+    # print(f"   Strategy: {current_strategy}")
+    # print(f"   Needs fallback: {needs_fallback}")
     
     if success:
         print("   → Routing to: responder (success)")
@@ -84,11 +84,3 @@ def create_graph_with_sql():
     else:
         print("⚠️ Compilando grafo sin memoria persistente")
         return graph.compile()
-
-    # NUEVO: Compilar con checkpointer si está disponible
-    # if postgres_saver:
-    #     print("🧠 Compilando grafo con memoria persistente (PostgresSaver)")
-    #     return graph.compile(checkpointer=postgres_saver)
-    # else:
-    #     print("⚠️ Compilando grafo sin memoria persistente")
-    #     return graph.compile()
