@@ -217,6 +217,7 @@ def get_semantic_descriptions_from_db(connection=None):
 def identify_dataset_with_llm(query: str, available_datasets: dict, semantic_descriptions: dict, user_context: dict) -> str:
     """
     Usa LLM para seleccionar el dataset más apropiado basándose en descripciones semánticas.
+    CORREGIDO: Maneja valores None en common_datasets
     """
     if not available_datasets:
         print("⚠️ No hay datasets disponibles")
@@ -226,18 +227,28 @@ def identify_dataset_with_llm(query: str, available_datasets: dict, semantic_des
     datasets_info = []
     for table_name, info in available_datasets.items():
         semantic_desc = semantic_descriptions.get(table_name, info.get("description", "Sin descripción"))
+        
+        # Manejar main_columns que pueden contener None
+        main_columns = info.get('main_columns', [])[:5]
+        valid_columns = [col for col in main_columns if col is not None and col != ""]
+        columns_str = ', '.join(valid_columns) if valid_columns else "N/A"
+        
         datasets_info.append(f"""
 Dataset: {table_name}
 Nombre amigable: {info.get('friendly_name', table_name)}
 Descripción: {semantic_desc}
-Columnas principales: {', '.join(info.get('main_columns', [])[:5])}
+Columnas principales: {columns_str}
 Cantidad de filas: {info.get('row_count', 'N/A')}
         """)
     
     # Considerar historial del usuario
     common_datasets_info = ""
     if user_context.get("common_datasets"):
-        common_datasets_info = f"\nDATASETS MÁS USADOS POR EL USUARIO: {', '.join(user_context['common_datasets'][:3])}"
+        # CORRECCIÓN: Filtrar valores None antes de hacer join
+        common_datasets = user_context['common_datasets'][:3]
+        valid_common = [ds for ds in common_datasets if ds is not None and ds != ""]
+        if valid_common:
+            common_datasets_info = f"\nDATASETS MÁS USADOS POR EL USUARIO: {', '.join(valid_common)}"
     
     prompt = f"""
 Analiza la consulta del usuario y selecciona el dataset MÁS apropiado.

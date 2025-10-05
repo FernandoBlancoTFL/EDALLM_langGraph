@@ -20,15 +20,39 @@ import dataset_manager
 llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", google_api_key=API_KEY, temperature=0)
 # llm = ChatOllama(model="gemma3", temperature=0)
 
+def generate_casual_response(query: str) -> str:
+    """
+    Genera respuestas breves para consultas casuales no relacionadas con análisis de datos.
+    """
+    query_lower = query.lower()
+    
+    # Respuestas a saludos
+    if any(word in query_lower for word in ["hola", "hello", "hi", "buenos días", "buenas tardes", "buenas noches"]):
+        return "¡Hola! Soy tu asistente de análisis de datos. Puedo ayudarte a analizar datasets, crear visualizaciones y responder preguntas sobre tus datos. ¿En qué puedo ayudarte?"
+    
+    # Respuestas a preguntas sobre identidad
+    if any(word in query_lower for word in ["cómo te llamas", "quién eres", "tu nombre", "what's your name", "who are you"]):
+        return "Soy LLM, un asistente especializado en análisis de datos. Puedo ayudarte a explorar y analizar datasets mediante consultas SQL y Python."
+    
+    # Respuestas a preguntas sobre capacidades
+    if any(word in query_lower for word in ["qué puedes hacer", "qué sabes hacer", "ayuda", "help", "capacidades"]):
+        return "Puedo ayudarte a:\n• Analizar datos de tus datasets\n• Crear visualizaciones (gráficos, histogramas, dispersión)\n• Realizar consultas SQL\n• Calcular estadísticas y agregaciones\n• Responder preguntas sobre tus datos almacenados\n\n¿Qué te gustaría analizar?"
+    
+    # Respuestas a agradecimientos
+    if any(word in query_lower for word in ["gracias", "thank you", "thanks"]):
+        return "¡De nada! Si necesitas analizar algo más, solo pregúntame."
+    
+    # Respuesta genérica para otras consultas casuales
+    return "Estoy aquí para ayudarte con análisis de datos. ¿Tienes alguna consulta sobre tus datasets?"
+
 def nodo_estrategia_datos(state: AgentState):
     """
-    MODIFICADO: Ahora recupera historial desde PostgresSaver y actualiza contexto
+    MODIFICADO: Clasificación unificada en 4 categorías con contexto de historial
     """
     print("🧠 Iniciando análisis con recuperación de memoria...")
     
     # Recuperar historial desde PostgresSaver
     if not state.get("conversation_history"):
-        # Intentar cargar desde PostgresSaver usando el thread_id
         thread_id = state.get("session_metadata", {}).get("thread_id", SINGLE_USER_THREAD_ID)
         conversation_history, user_context = load_conversation_history(thread_id)
         
@@ -48,30 +72,93 @@ def nodo_estrategia_datos(state: AgentState):
         print(f"💭 Memoria recuperada: {len(state['conversation_history'])} conversaciones previas")
         print(f"📝 Resumen: {memory_summary[:100]}...")
         
-        # Cargar patrones aprendidos desde el historial
         if not state.get("learned_patterns"):
             state["learned_patterns"] = extract_learned_patterns_from_history(state["conversation_history"])
     else:
         state["memory_summary"] = "Primera conversación con el usuario"
         print("🆕 Primera interacción - sin historial previo")
     
-    # Detectar si la consulta es sobre memoria ANTES de analizar estrategia
-    if is_memory_query(state["query"]):
-        print("🧠 Consulta sobre memoria detectada - respuesta directa")
+    # 🆕 CLASIFICACIÓN UNIFICADA EN 4 CATEGORÍAS
+    query_type_prompt = f"""
+Analiza esta consulta del usuario y clasifica su intención considerando el historial de conversaciones.
+
+CONSULTA: {state['query']}
+
+HISTORIAL DISPONIBLE:
+{state['memory_summary']}
+
+TIPOS DE CONSULTA (en orden de prioridad):
+
+1. MEMORY: La respuesta puede obtenerse del historial de conversaciones
+   - Preguntas sobre conversaciones anteriores ("¿qué te pregunté antes?")
+   - Preguntas sobre información personal mencionada previamente ("¿sabes mi nombre?", "¿recuerdas lo que te dije?")
+   - Referencias a análisis previos ("¿cuál fue el último gráfico?")
+   - SOLO si hay historial que pueda responder la pregunta
+
+2. DATA_ANALYSIS: Solicita análisis, visualización, estadísticas sobre datasets
+   - Requiere acceso a datos para responder
+   - Análisis, gráficos, consultas SQL, estadísticas
+
+3. CASUAL_CHAT: Charla casual SIN contexto en historial
+   - Saludos, presentaciones, preguntas sobre capacidades
+   - Preguntas personales que NO tienen respuesta en el historial
+   
+4. NONSENSE: Texto sin sentido, errores evidentes
+   - Palabras aleatorias, texto incoherente
+
+EJEMPLOS:
+- "¿Sabes mi nombre?" + (historial contiene nombre) → MEMORY
+- "¿Sabes mi nombre?" + (historial SIN nombre) → MEMORY (responderá que no lo sabe)
+- "¿Qué me dijiste sobre cocodrilos?" → MEMORY
+- "Hola, buenos días" → CASUAL_CHAT
+- "¿Cómo te llamas?" → CASUAL_CHAT
+- "Cuenta las filas del dataset" → DATA_ANALYSIS
+- "asdfgh jklñ" → NONSENSE
+
+PRIORIDAD: Si la consulta se refiere al historial o información previa, SIEMPRE es MEMORY (incluso si no hay respuesta).
+
+Responde SOLO con una palabra: MEMORY, DATA_ANALYSIS, CASUAL_CHAT o NONSENSE
+"""
+    
+    query_type_response = llm.invoke(query_type_prompt).content.strip().upper()
+    
+    # Manejar consultas de MEMORIA
+    if "MEMORY" in query_type_response:
+        print("🧠 Consulta de memoria detectada - buscando en historial")
         state["data_strategy"] = "memory"
-        state["strategy_reason"] = "Consulta sobre historial de conversaciones - respuesta directa desde memoria cargada"
-        state["result"] = generate_memory_response(state)
+        state["strategy_reason"] = "Consulta relacionada con historial de conversaciones"
+        state["result"] = generate_memory_response_with_search(state)
         state["success"] = True
-        state["history"].append(f"Memoria → Respuesta directa sobre historial")
+        state["history"].append(f"Memoria → Respuesta desde historial")
         return state
     
+    # Manejar consultas CASUALES
+    if "CASUAL_CHAT" in query_type_response:
+        print("💬 Consulta casual detectada - respuesta directa")
+        state["data_strategy"] = "casual"
+        state["strategy_reason"] = "Consulta casual no relacionada con análisis de datos"
+        state["result"] = generate_casual_response(state["query"])
+        state["success"] = True
+        state["history"].append(f"Casual → Respuesta conversacional")
+        return state
+    
+    # Manejar consultas SIN SENTIDO
+    if "NONSENSE" in query_type_response:
+        print("⚠️ Consulta sin sentido detectada")
+        state["data_strategy"] = "nonsense"
+        state["strategy_reason"] = "Consulta sin sentido o error de escritura"
+        state["result"] = "Lo siento, no pude entender tu consulta. Parece que hay un error de escritura o el mensaje no tiene sentido. ¿Podrías reformular tu pregunta?"
+        state["success"] = True
+        state["history"].append(f"Nonsense → Solicitud de clarificación")
+        return state
+    
+    # Si llegamos aquí, es DATA_ANALYSIS - continuar con flujo normal
     print("🔍 Analizando estrategia de acceso a datos...")
     
     if not state.get("available_datasets"):
         state["available_datasets"] = get_all_available_datasets()
     
     if not state.get("selected_dataset"):
-        # Usar contexto histórico para selección de dataset
         selected_dataset = identify_dataset_from_query_with_memory(
             state["query"], 
             state["available_datasets"],
@@ -151,10 +238,12 @@ def node_clasificar_modificado(state: AgentState):
     # La estrategia ya fue definida por nodo_estrategia_datos
     data_strategy = state.get("data_strategy", "dataframe")
     
-    if data_strategy == "memory":
-        state["thought"] = "Consulta de memoria - no requiere procesamiento de datos"
-        state["action"] = "memory_query"
-        state["history"].append("Clasificar (Mod) → Memory Query (skip LLM)")
+    # 🆕 NUEVO: Validación temprana para estrategias que no requieren clasificación
+    if data_strategy in ["memory", "casual", "nonsense"]:
+        print(f"⚡ Estrategia {data_strategy.upper()} detectada - Saltando clasificación")
+        state["thought"] = f"Consulta tipo {data_strategy} - no requiere procesamiento de datos"
+        state["action"] = f"{data_strategy}_query"
+        state["history"].append(f"Clasificar (Mod) → {data_strategy.title()} Query (skip LLM)")
         return state
     
     selected_dataset = state.get("selected_dataset")

@@ -57,6 +57,11 @@ def main():
     
     while True:
         query = input("Pregunta sobre el dataset (o 'salir'): ")
+
+        if not query or query.strip() == "":
+            print("⚠️ Por favor, escribe una consulta válida para continuar.")
+            print("   No puedo procesar mensajes vacíos.\n")
+            continue
         
         if query.lower() == "salir":
             break
