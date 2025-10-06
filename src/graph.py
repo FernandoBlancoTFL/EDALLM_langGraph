@@ -12,9 +12,9 @@ def route_after_classification(state: AgentState):
     print(f"   Action: {action}")
     print(f"   Strategy: {data_strategy}")
     
-    # 🆕 NUEVO: Manejar consultas casuales, sin sentido y de memoria
-    if data_strategy in ["memory", "casual", "nonsense"]:
-        print(f"   → Routing to: responder ({data_strategy})")
+    # Manejar consultas de memoria
+    if data_strategy == "memory":
+        print("   → Routing to: responder (memoria)")
         return "responder"
     
     # Mapeo de acciones a nodos para consultas normales

@@ -93,7 +93,6 @@ def main():
             "needs_fallback": False,
             "strategy_reason": "",
             "sql_error": None,
-            
             # CAMPOS DE MEMORIA AUTOMÁTICA - SE CARGARÁN EN nodo_estrategia_datos
             "conversation_history": [],  # Se cargará desde PostgresSaver
             "user_context": {},          # Se cargará desde PostgresSaver

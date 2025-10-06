@@ -22,7 +22,7 @@ def setup_postgres_saver():
         # Crear connection string para PostgresSaver
         postgres_uri = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
         
-        # CORRECCIÓN: Crear con autocommit para evitar error de índices concurrentes
+        # Crear con autocommit para evitar error de índices concurrentes
         conn = psycopg.connect(postgres_uri, autocommit=True)
         checkpointer = PostgresSaver(conn)
         
@@ -114,10 +114,8 @@ def list_user_conversations(postgres_saver_instance, user_id: str = None):
 def load_conversation_history(thread_id: str):
     """
     Recupera el historial de conversaciones desde PostgresSaver para un thread específico.
-    CORREGIDO: Maneja correctamente la estructura del checkpoint
+    CORREGIDO: Usa correctamente la API de PostgresSaver
     """
-    #global postgres_saver
-
     postgres_saver = get_postgres_saver()
     
     if not postgres_saver:
@@ -125,66 +123,44 @@ def load_conversation_history(thread_id: str):
         return [], {}
     
     try:
-        # Obtener el checkpoint más reciente para este thread
         config = {"configurable": {"thread_id": thread_id}}
         
-        # Intentar obtener el estado más reciente
-        checkpoint = postgres_saver.get(config)
+        # CORRECCIÓN: Usar get_tuple() en lugar de get()
+        checkpoint_tuple = postgres_saver.get_tuple(config)
         
-        if checkpoint:
-            # El checkpoint es un diccionario con la estructura correcta
-            # Buscar en los valores del estado
-            state_values = None
+        if checkpoint_tuple and checkpoint_tuple.checkpoint:
+            checkpoint = checkpoint_tuple.checkpoint
             
-            # Intentar diferentes formas de acceder a los datos
-            if isinstance(checkpoint, dict):
-                # Caso 1: El checkpoint es directamente el diccionario de estado
-                if "conversation_history" in checkpoint:
-                    state_values = checkpoint
-                # Caso 2: Los valores están en una clave específica
-                elif "values" in checkpoint:
-                    state_values = checkpoint["values"]
-                elif "state" in checkpoint:
-                    state_values = checkpoint["state"]
-                # Caso 3: Buscar en las claves del checkpoint
-                else:
-                    # Buscar cualquier clave que contenga conversation_history
-                    for key, value in checkpoint.items():
-                        if isinstance(value, dict) and "conversation_history" in value:
-                            state_values = value
-                            break
+            # CORRECCIÓN: Los valores del estado están en channel_values
+            channel_values = checkpoint.get("channel_values") or checkpoint.get("channel_versions", {})
             
-            if state_values and "conversation_history" in state_values:
-                # Recuperar historial de conversaciones
-                conversation_history = state_values.get("conversation_history", [])
-                user_context = state_values.get("user_context", {
-                    "preferred_analysis_type": None,
-                    "common_datasets": [],
-                    "visualization_preferences": [],
-                    "error_patterns": [],
-                    "last_interaction": None
-                })
-                
-                print(f"📚 Historial recuperado: {len(conversation_history)} conversaciones previas")
-                print(f"👤 Contexto de usuario recuperado: {len(user_context.get('common_datasets', []))} datasets comunes")
-                
-                return conversation_history, user_context
-            else:
-                print("📭 No se encontró historial en la estructura del checkpoint")
-                # Para debugging: mostrar las claves disponibles
-                if isinstance(checkpoint, dict):
-                    print(f"🔍 Claves disponibles en checkpoint: {list(checkpoint.keys())}")
+            if not channel_values:
+                print("📭 No se encontraron valores en el checkpoint")
+                print(f"🔍 Claves disponibles: {list(checkpoint.keys())}")
                 return [], {}
+            
+            # Recuperar conversation_history y user_context
+            conversation_history = channel_values.get("conversation_history", [])
+            user_context = channel_values.get("user_context", {
+                "preferred_analysis_type": None,
+                "common_datasets": [],
+                "visualization_preferences": [],
+                "error_patterns": [],
+                "last_interaction": None
+            })
+            
+            print(f"📚 Historial recuperado: {len(conversation_history)} conversaciones")
+            print(f"👤 Contexto: {len(user_context.get('common_datasets', []))} datasets")
+            
+            return conversation_history, user_context
         else:
             print("📭 No se encontró checkpoint previo para este thread")
             return [], {}
             
     except Exception as e:
         print(f"⚠️ Error recuperando historial: {e}")
-        # Para debugging: mostrar más información del error
-        print(f"🔍 Tipo de error: {type(e).__name__}")
-        if hasattr(e, 'args'):
-            print(f"🔍 Detalles: {e.args}")
+        import traceback
+        traceback.print_exc()
         return [], {}
 
 def debug_checkpoint_structure(thread_id: str):

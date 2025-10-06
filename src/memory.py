@@ -33,63 +33,6 @@ def generate_memory_summary(conversation_history: List[dict]) -> str:
     
     return "; ".join(summary_parts)
 
-def generate_memory_response_with_search(state: AgentState) -> str:
-    """
-    Busca activamente en el historial para responder la consulta.
-    Si no encuentra información relevante, lo comunica honestamente.
-    """
-    conversation_history = state.get("conversation_history", [])
-    query = state["query"]
-    
-    if not conversation_history:
-        return "No tengo memoria de conversaciones anteriores en esta sesión, así que no puedo responder a tu pregunta sobre el historial."
-    
-    # Crear contexto del historial para búsqueda
-    history_context = []
-    for i, conv in enumerate(conversation_history, 1):
-        query_text = conv.get("query", "N/A")
-        response_text = conv.get("response", "N/A")[:200]
-        success = conv.get("success", False)
-        
-        history_context.append(f"""
-Conversación {i}:
-- Usuario preguntó: {query_text}
-- Estado: {'Exitosa' if success else 'No exitosa'}
-- Respuesta: {response_text}
-        """)
-    
-    # Prompt para búsqueda inteligente
-    search_prompt = f"""
-El usuario te pregunta: "{query}"
-
-Tienes acceso al historial de {len(conversation_history)} conversaciones previas:
-
-{chr(10).join(history_context)}
-
-TAREA:
-1. Busca en el historial si hay información que responda a la pregunta del usuario
-2. Si ENCUENTRAS información relevante: Responde con esa información específica
-3. Si NO ENCUENTRAS información: Responde honestamente que no tienes esa información en el historial
-
-IMPORTANTE:
-- Sé específico con la información que encuentres
-- Si el usuario pregunta su nombre y lo mencionó en alguna conversación, dile su nombre
-- Si pregunta sobre análisis previos, menciona qué análisis hizo
-- Si NO hay información, sé honesto: "No tengo esa información en nuestro historial"
-
-Genera una respuesta natural y útil.
-"""
-    
-    try:
-        from nodes import llm
-        response = llm.invoke(search_prompt).content.strip()
-        print(f"🔍 Búsqueda en memoria completada")
-        return response
-    except Exception as e:
-        print(f"❌ Error buscando en memoria: {e}")
-        # Fallback a respuesta simple
-        return f"Tengo {len(conversation_history)} conversaciones en memoria, pero tuve problemas buscando la información específica que solicitaste."
-
 def extract_learned_patterns_from_history(conversation_history: List[dict]) -> List[str]:
     """
     Extrae patrones aprendidos del historial de conversaciones existente.

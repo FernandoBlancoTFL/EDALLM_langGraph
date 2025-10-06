@@ -234,12 +234,12 @@ def identify_dataset_with_llm(query: str, available_datasets: dict, semantic_des
         columns_str = ', '.join(valid_columns) if valid_columns else "N/A"
         
         datasets_info.append(f"""
-Dataset: {table_name}
-Nombre amigable: {info.get('friendly_name', table_name)}
-Descripción: {semantic_desc}
-Columnas principales: {columns_str}
-Cantidad de filas: {info.get('row_count', 'N/A')}
-        """)
+                                Dataset: {table_name}
+                                Nombre amigable: {info.get('friendly_name', table_name)}
+                                Descripción: {semantic_desc}
+                                Columnas principales: {columns_str}
+                                Cantidad de filas: {info.get('row_count', 'N/A')}
+                            """)
     
     # Considerar historial del usuario
     common_datasets_info = ""
