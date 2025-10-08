@@ -1,114 +1,94 @@
-import os
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-from config import df
-from typing import Optional, List
+from datetime import datetime
+from dataset_manager import list_stored_tables
+from checkpoints import load_conversation_history
 
-# ======================
-# Función para ejecutar código Python con df
-# ======================
-def run_python_with_df(code: str, error_context: Optional[str] = None):
-    """
-    Ejecuta código Python con acceso al DataFrame `df` ya cargado.
-    Incluye contexto de errores previos para mejor debugging.
-    """
-    local_vars = {"df": df, "pd": pd, "plt": plt, "sns": sns, "os": os}
+def clean_data_for_json(data):
+    """Función simplificada solo para datasets"""
+    if isinstance(data, dict):
+        return {k: clean_data_for_json(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [clean_data_for_json(item) for item in data]
+    elif pd.isna(data):
+        return "NULL"
+    elif hasattr(data, 'isoformat'):  # Timestamps
+        return data.isoformat()
+    else:
+        return data
 
-    prohibited_patterns = [
-        "pd.DataFrame",
-        "df = ",
-        "data = {",
-        "= pd.DataFrame",
-        "DataFrame(",
-        "# Datos de ejemplo",
-        "datos de ejemplo",
-        "reemplaza con tu DataFrame"
-    ]
+def clean_state_for_serialization(state):
+    """
+    Limpia el estado para que sea serializable por msgpack.
+    Remueve o convierte objetos no serializables como DataFrames.
+    """
+    cleaned_state = state.copy()
     
-    code_lower = code.lower()
-    for pattern in prohibited_patterns:
-        if pattern.lower() in code_lower:
-            return {
-                "success": False,
-                "result": None,
-                "error": f"Código bloqueado. Detectado intento de crear DataFrame: '{pattern}'. Usa SOLO el df existente.",
-                "error_type": "prohibited_pattern"
-            }
-
-    try:
-        import ast
-        parsed = ast.parse(code)
-        if parsed.body and isinstance(parsed.body[-1], ast.Expr):
-            last_expr = parsed.body.pop()
-            exec(compile(ast.Module(parsed.body, type_ignores=[]), filename="<ast>", mode="exec"), {}, local_vars)
-            result = eval(compile(ast.Expression(last_expr.value), filename="<ast>", mode="eval"), {}, local_vars)
-        else:
-            exec(code, {}, local_vars)
-            result = None
-
-        return {
-            "success": True,
-            "result": result if result is not None else "✅ Código ejecutado con éxito.",
-            "error": None,
-            "error_type": None
-        }
-    except Exception as e:
-        error_type = type(e).__name__
-        return {
-            "success": False,
-            "result": None,
-            "error": str(e),
-            "error_type": error_type
-        }
-
-# ======================
-# Prompt builder
-# ======================
-def build_code_prompt(query: str, execution_history: List[dict] = None, df_info: dict = None):
-    """
-    Genera un prompt contextual que incluye historial de errores y información del DataFrame.
-    """
-    
-    # Información básica del DataFrame
-    if df_info is None:
-        df_info = {
-            "columns": list(df.columns),
-            "dtypes": df.dtypes.to_dict(),
+    # Limpiar sql_results si contiene DataFrame
+    if "sql_results" in cleaned_state and hasattr(cleaned_state["sql_results"], 'to_dict'):
+        df = cleaned_state["sql_results"]
+        cleaned_state["sql_results"] = {
+            "data": df.head(100).to_dict('records'),  # Limitar a 100 filas
+            "columns": df.columns.tolist(),
             "shape": df.shape,
-            "sample": df.head(2).to_dict()
+            "serialized": True
         }
     
-    base_prompt = f"""
-        Eres un experto en análisis de datos con Python y pandas.
-
-        INFORMACIÓN DEL DATAFRAME:
-        - Columnas disponibles: {df_info['columns']}
-        - Tipos de datos: {', '.join([f"{col}: {dtype}" for col, dtype in df_info['dtypes'].items()])}
-        - Dimensiones: {df_info['shape']}
-
-        REGLAS IMPORTANTES:
-        1. Usa EXCLUSIVAMENTE el DataFrame 'df' que ya está cargado
-        2. NO crees ni simules nuevos DataFrames ni datos de ejemplo
-        3. Para gráficos, guarda en './outputs/' y usa plt.show()
-        4. Si trabajas con columnas de tiempo, verifica su tipo primero
-        5. Para columnas tipo 'time', usa df['columna'].astype(str) o métodos específicos
-
-        TAREA: {query}
-    """
-
-    # Agregar historial de errores si existe
-    if execution_history:
-        base_prompt += "\n\nHISTORIAL DE INTENTOS PREVIOS:\n"
-        for i, attempt in enumerate(execution_history, 1):
-            if not attempt['success']:
-                base_prompt += f"""
-                    Intento {i}:
-                    Código: {attempt.get('code', 'N/A')}
-                    Error: {attempt['error']} (Tipo: {attempt['error_type']})
-                """
-        
-    base_prompt += "\n⚠️ IMPORTANTE: Analiza los errores anteriores y genera un código DIFERENTE que los evite. Solo genera un gráfico UNICAMENTE si el usuario lo pide.\n"
-    base_prompt += "\nResponde SOLO con código Python ejecutable, sin explicaciones ni markdown:"
+    # Limpiar otros campos que puedan contener objetos no serializables
+    if "df_info" in cleaned_state and "sample" in cleaned_state["df_info"]:
+        # Ya está limpio por clean_data_for_json, pero verificar
+        pass
     
-    return base_prompt
+    # Limpiar execution_history de posibles objetos no serializables
+    if "execution_history" in cleaned_state:
+        for record in cleaned_state["execution_history"]:
+            if "result" in record and hasattr(record["result"], 'to_dict'):
+                # Si el resultado es un DataFrame, convertirlo
+                record["result"] = f"DataFrame con shape {record['result'].shape}"
+    
+    return cleaned_state
+
+def show_stored_files():
+    """
+    Muestra los archivos almacenados en la BD de forma amigable.
+    """
+    # print("🔍 Buscando tablas en la base de datos...")
+    stored_tables = list_stored_tables()
+    
+    if not stored_tables:
+        print("📁 No se encontraron tablas de dataset en la base de datos")
+        print("💡 Verifica que las tablas se hayan creado correctamente")
+        
+        # Mostrar información adicional para debugging
+        print("\n🔧 Para verificar manualmente, puedes ejecutar en PostgreSQL:")
+        print("   SELECT table_name FROM information_schema.tables WHERE table_schema = 'public';")
+        return
+    
+    print(f"📁 Los siguientes archivos se encuentran en mi BD. Puedes preguntar sobre ellos ({len(stored_tables)} encontrados):")
+    for i, table_name in enumerate(stored_tables, 1):
+        print(f"   {i}. {table_name}")
+
+def show_conversation_memory(thread_id: str):
+    """
+    Muestra un resumen de la memoria de conversación para debugging.
+    """
+    # Primero hacer debugging de la estructura
+    # debug_checkpoint_structure(thread_id)
+    
+    conversation_history, user_context = load_conversation_history(thread_id)
+    
+    if conversation_history:
+        print(f"🧠 Memoria encontrada:")
+        print(f"   📚 {len(conversation_history)} conversaciones previas")
+        print(f"   📊 Datasets usados: {user_context.get('common_datasets', [])}")
+        print(f"   🎯 Estrategia preferida: {user_context.get('preferred_analysis_type', 'N/A')}")
+        print(f"   ⚠️ Patrones de error: {len(user_context.get('error_patterns', []))}")
+        
+        # Mostrar última conversación
+        if conversation_history:
+            last_conv = conversation_history[-1]
+            print(f"   🕒 Última consulta: {last_conv.get('query', 'N/A')[:50]}...")
+            print(f"   ✅ Fue exitosa: {last_conv.get('success', False)}")
+    else:
+        print("🧠 No se encontró memoria previa")
+    
+    print()

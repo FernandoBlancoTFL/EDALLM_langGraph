@@ -10,6 +10,7 @@ tabulate
 
 langchain-google-genai
 langchain-ollama
+langchain-groq
 
 langchain-experimental
 
