@@ -1,9 +1,10 @@
 import pandas as pd
 from langchain_google_genai import ChatGoogleGenerativeAI
 # from langchain_ollama import ChatOllama
+from langchain_groq import ChatGroq
 from datetime import datetime
 from state import AgentState
-from config import API_KEY, SINGLE_USER_THREAD_ID
+from config import API_KEY, GROQ_KEY, SINGLE_USER_THREAD_ID
 from database import data_connection, load_db_config
 from dataset_manager import df
 from tools import run_python_with_df, get_tools_summary, tools
@@ -18,17 +19,16 @@ import dataset_manager
 
 # Inicializar LLM
 llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", google_api_key=API_KEY, temperature=0)
+# llm = ChatGroq(model="llama-3.1-8b-instant", api_key=GROQ_KEY, temperature=0)
 # llm = ChatOllama(model="gemma3", temperature=0)
 
 def nodo_estrategia_datos(state: AgentState):
     """
-    MODIFICADO: Ahora recupera historial desde PostgresSaver y actualiza contexto
+    Recupera historial desde PostgresSaver y actualiza contexto
     """
     print("🧠 Iniciando análisis con recuperación de memoria...")
-    
-    # Recuperar historial desde PostgresSaver
-    if not state.get("conversation_history"):
-        # Intentar cargar desde PostgresSaver usando el thread_id
+
+    if not state.get("conversation_history") or len(state.get("conversation_history", [])) == 0:
         thread_id = state.get("session_metadata", {}).get("thread_id", SINGLE_USER_THREAD_ID)
         conversation_history, user_context = load_conversation_history(thread_id)
         
@@ -84,6 +84,15 @@ def nodo_estrategia_datos(state: AgentState):
     # Obtener metadatos y analizar estrategia
     table_metadata = get_table_metadata_light(state["selected_dataset"])
     state["table_metadata"] = table_metadata
+
+    is_viz, viz_reason = is_visualization_query(state["query"])
+    if is_viz:
+        state["data_strategy"] = "dataframe"
+        state["sql_feasible"] = False
+        state["strategy_reason"] = f"Estrategia DATAFRAME forzada automáticamente: {viz_reason}"
+        state["history"].append(f"Estrategia → DATAFRAME (auto-detección: {viz_reason})")
+        
+        return state
     
     # Analizar consulta con contexto histórico
     strategy_prompt = f"""

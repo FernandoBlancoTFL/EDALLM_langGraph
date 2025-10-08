@@ -93,11 +93,7 @@ def main():
             "needs_fallback": False,
             "strategy_reason": "",
             "sql_error": None,
-            # CAMPOS DE MEMORIA AUTOMÁTICA - SE CARGARÁN EN nodo_estrategia_datos
-            "conversation_history": [],  # Se cargará desde PostgresSaver
-            "user_context": {},          # Se cargará desde PostgresSaver
-            "memory_summary": "",        # Se generará desde historial cargado
-            "learned_patterns": [],      # Se extraerán desde historial cargado
+            # NO inicializar estos campos - dejar que el grafo los maneje
             "session_metadata": {
                 "thread_id": thread_id,
                 "session_start": datetime.now().isoformat(),

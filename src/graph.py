@@ -8,9 +8,9 @@ def route_after_classification(state: AgentState):
     action = state.get("action", "Python_Interpreter")
     data_strategy = state.get("data_strategy", "dataframe")
     
-    print(f"\n🔧 Routing después de clasificación:")
-    print(f"   Action: {action}")
-    print(f"   Strategy: {data_strategy}")
+    # print(f"\n🔧 Routing después de clasificación:")
+    # print(f"   Action: {action}")
+    # print(f"   Strategy: {data_strategy}")
     
     # Manejar consultas de memoria
     if data_strategy == "memory":

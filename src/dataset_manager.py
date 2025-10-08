@@ -189,7 +189,7 @@ def list_stored_tables(connection=None):
             temp_connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
             conn = psycopg.connect(temp_connection_string)
             temp_connection = True
-            print("🔗 Conexión temporal creada para listar tablas")
+            # print("🔗 Conexión temporal creada para listar tablas")
         except Exception as e:
             print(f"⚠️ No se pudo crear conexión para listar tablas: {e}")
             return []

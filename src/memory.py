@@ -80,7 +80,6 @@ def is_memory_query(query: str) -> bool:
 def generate_memory_response(state: AgentState) -> str:
     """
     Genera una respuesta directa sobre la memoria/historial sin usar SQL o herramientas.
-    CORREGIDO: Maneja valores None en datasets_used
     """
     conversation_history = state.get("conversation_history", [])
     query = state["query"]
@@ -103,8 +102,7 @@ def generate_memory_response(state: AgentState) -> str:
     # Agregar información de contexto
     user_context = state.get("user_context", {})
     datasets_used = user_context.get("common_datasets", [])
-    
-    # CORRECCIÓN: Filtrar valores None antes de hacer join
+
     if datasets_used:
         # Filtrar None y valores vacíos
         valid_datasets = [ds for ds in datasets_used if ds is not None and ds != ""]
@@ -178,3 +176,73 @@ def update_learned_patterns(state: AgentState, conversation_record: dict):
     
     # Mantener solo los 5 patrones más recientes
     state["learned_patterns"] = patterns[-5:]
+
+def is_visualization_query(query: str) -> tuple[bool, str]:
+    """
+    Detecta si la consulta requiere obligatoriamente DataFrame por visualización/análisis complejo.
+    Retorna (es_visualización, razón)
+    """
+    query_lower = query.lower()
+    
+    # Palabras clave para visualizaciones
+    visualization_keywords = {
+        'graficar', 'gráfico', 'grafica', 'gráfica', 'grafique',
+        'histograma', 'histogram',
+        'plot', 'plotear', 'plotea',
+        'diagrama', 'chart',
+        'scatter', 'dispersión', 'dispersion',
+        'barras', 'bar chart',
+        'líneas', 'lineas', 'line chart',
+        'boxplot', 'box plot', 'caja',
+        'heatmap', 'mapa de calor',
+        'visualizar', 'visualiza', 'visualización', 'visualizacion',
+        'generar gráfico', 'generar grafico', 'crear gráfico', 'crear grafico',
+        'mostrar gráfico', 'mostrar grafico',
+        'pie chart', 'torta', 'pastel'
+    }
+    
+    # Palabras clave para análisis complejos que requieren DataFrame
+    complex_analysis_keywords = {
+        'correlación', 'correlacion', 'correlation',
+        'regresión', 'regresion', 'regression',
+        'clustering', 'agrupar', 'agrupamiento',
+        'normalizar', 'normalización', 'normalization',
+        'transformar', 'transformación', 'transformation',
+        'pivot', 'pivotar', 'tabla pivote',
+        'melt', 'unpivot',
+        'merge', 'combinar dataframes',
+        'estadísticas descriptivas complejas',
+        'análisis exploratorio', 'analisis exploratorio',
+        'distribución', 'distribucion', 'distribution'
+    }
+    
+    # Verbos de generación que implican visualización
+    generation_verbs = {
+        'genera', 'generar', 'generá', 'generame',
+        'crea', 'crear', 'creá', 'creame',
+        'hace', 'hacer', 'hacé', 'haceme',
+        'muestra', 'mostrar', 'mostrá', 'mostrame',
+        'dibuja', 'dibujar', 'dibujá', 'dibujame'
+    }
+    
+    # Verificar si hay un verbo de generación + término de visualización cercano
+    words = query_lower.split()
+    for i, word in enumerate(words):
+        if any(verb in word for verb in generation_verbs):
+            # Verificar las siguientes 3-4 palabras
+            context = ' '.join(words[i:i+5])
+            for viz_keyword in visualization_keywords:
+                if viz_keyword in context:
+                    return True, f"Detectado verbo de generación '{word}' + visualización '{viz_keyword}'"
+    
+    # Verificar palabras clave de visualización directamente
+    for keyword in visualization_keywords:
+        if keyword in query_lower:
+            return True, f"Palabra clave de visualización detectada: '{keyword}'"
+    
+    # Verificar análisis complejos
+    for keyword in complex_analysis_keywords:
+        if keyword in query_lower:
+            return True, f"Análisis complejo detectado: '{keyword}'"
+    
+    return False, ""

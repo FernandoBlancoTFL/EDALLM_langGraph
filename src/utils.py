@@ -51,7 +51,7 @@ def show_stored_files():
     """
     Muestra los archivos almacenados en la BD de forma amigable.
     """
-    print("🔍 Buscando tablas en la base de datos...")
+    # print("🔍 Buscando tablas en la base de datos...")
     stored_tables = list_stored_tables()
     
     if not stored_tables:
