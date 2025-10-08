@@ -8,16 +8,21 @@ def route_after_classification(state: AgentState):
     action = state.get("action", "Python_Interpreter")
     data_strategy = state.get("data_strategy", "dataframe")
     
-    # print(f"\n🔧 Routing después de clasificación:")
-    # print(f"   Action: {action}")
-    # print(f"   Strategy: {data_strategy}")
+    print(f"\n🔧 Routing después de clasificación:")
+    print(f"   Action: {action}")
+    print(f"   Strategy: {data_strategy}")
     
-    # Manejar consultas de memoria
+    # Manejar consultas generales (saludos, ayuda) - ir directo a responder
+    if data_strategy == "general":
+        print("   → Routing to: responder (general)")
+        return "responder"
+    
+    # Manejar consultas de memoria - ir directo a responder
     if data_strategy == "memory":
         print("   → Routing to: responder (memoria)")
         return "responder"
     
-    # Mapeo de acciones a nodos para consultas normales
+    # Mapeo de acciones a nodos para consultas de datos normales
     if action == "SQL_Executor" or (data_strategy == "sql" and action not in ["Python_Interpreter"]):
         print("   → Routing to: sql_executor")
         return "sql_executor"

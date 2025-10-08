@@ -28,6 +28,20 @@ def nodo_estrategia_datos(state: AgentState):
     """
     print("🧠 Iniciando análisis con recuperación de memoria...")
 
+    # DETECCIÓN 0: Consultas generales (saludos, ayuda, conversación) - ANTES DE TODO
+    is_general, general_type, general_response = is_general_query(state["query"])
+    if is_general:
+        print(f"💬 Consulta general detectada ({general_type}) - Respuesta instantánea")
+        state["data_strategy"] = "general"
+        state["strategy_reason"] = f"Consulta general de tipo '{general_type}' - no requiere análisis de datos"
+        state["result"] = general_response
+        state["success"] = True
+        state["history"].append(f"General → Respuesta instantánea ({general_type})")
+        
+        # No actualizar memoria para consultas triviales
+        return state
+
+    # Recuperar historial (solo si no es consulta general)
     if not state.get("conversation_history") or len(state.get("conversation_history", [])) == 0:
         thread_id = state.get("session_metadata", {}).get("thread_id", SINGLE_USER_THREAD_ID)
         conversation_history, user_context = load_conversation_history(thread_id)
@@ -48,14 +62,13 @@ def nodo_estrategia_datos(state: AgentState):
         print(f"💭 Memoria recuperada: {len(state['conversation_history'])} conversaciones previas")
         print(f"📝 Resumen: {memory_summary[:100]}...")
         
-        # Cargar patrones aprendidos desde el historial
         if not state.get("learned_patterns"):
             state["learned_patterns"] = extract_learned_patterns_from_history(state["conversation_history"])
     else:
         state["memory_summary"] = "Primera conversación con el usuario"
         print("🆕 Primera interacción - sin historial previo")
     
-    # Detectar si la consulta es sobre memoria ANTES de analizar estrategia
+    # DETECCIÓN 1: Consultas sobre memoria
     if is_memory_query(state["query"]):
         print("🧠 Consulta sobre memoria detectada - respuesta directa")
         state["data_strategy"] = "memory"
@@ -71,7 +84,6 @@ def nodo_estrategia_datos(state: AgentState):
         state["available_datasets"] = get_all_available_datasets()
     
     if not state.get("selected_dataset"):
-        # Usar contexto histórico para selección de dataset
         selected_dataset = identify_dataset_from_query_with_memory(
             state["query"], 
             state["available_datasets"],
@@ -85,14 +97,20 @@ def nodo_estrategia_datos(state: AgentState):
     table_metadata = get_table_metadata_light(state["selected_dataset"])
     state["table_metadata"] = table_metadata
 
+    # DETECCIÓN 2: Visualizaciones - forzar DATAFRAME
     is_viz, viz_reason = is_visualization_query(state["query"])
     if is_viz:
+        print(f"📊 Visualización detectada - FORZANDO estrategia DATAFRAME")
+        print(f"🔍 Razón: {viz_reason}")
         state["data_strategy"] = "dataframe"
         state["sql_feasible"] = False
         state["strategy_reason"] = f"Estrategia DATAFRAME forzada automáticamente: {viz_reason}"
         state["history"].append(f"Estrategia → DATAFRAME (auto-detección: {viz_reason})")
         
         return state
+    
+    # DETECCIÓN 3: Análisis normal - usar LLM
+    print("🔍 Usando LLM para determinar estrategia...")
     
     # Analizar consulta con contexto histórico
     strategy_prompt = f"""
@@ -147,7 +165,7 @@ def nodo_estrategia_datos(state: AgentState):
     state["sql_feasible"] = sql_feasible
     state["strategy_reason"] = reason
     
-    print(f"📊 Estrategia seleccionada: {strategy.upper()}")
+    print(f"📊 Estrategia seleccionada: {strategy.upper()} (LLM)")
     print(f"🔍 Razón (usando memoria): {reason}")
     
     state["history"].append(f"Estrategia → {strategy.upper()} - {reason}")
@@ -160,10 +178,19 @@ def node_clasificar_modificado(state: AgentState):
     # La estrategia ya fue definida por nodo_estrategia_datos
     data_strategy = state.get("data_strategy", "dataframe")
     
+    # Skip LLM para consultas de memoria
     if data_strategy == "memory":
         state["thought"] = "Consulta de memoria - no requiere procesamiento de datos"
         state["action"] = "memory_query"
         state["history"].append("Clasificar (Mod) → Memory Query (skip LLM)")
+        return state
+    
+    # Skip LLM para consultas generales (saludos, ayuda, conversación)
+    if data_strategy == "general":
+        state["thought"] = "Consulta general - respuesta directa sin análisis de datos"
+        state["action"] = "general_response"
+        print(f"💬 Consulta general - sin clasificación de herramientas")
+        state["history"].append("Clasificar (Mod) → General Query (skip LLM)")
         return state
     
     selected_dataset = state.get("selected_dataset")
@@ -469,114 +496,137 @@ def node_responder(state: AgentState):
     Genera respuestas interpretativas con datos específicos obtenidos
     """
     success = state.get("success", False)
+    data_strategy = state.get("data_strategy", "dataframe")
+    
+    # Detectar si es una consulta que NO debe guardarse en memoria
+    skip_memory = data_strategy in ["general", "greeting", "help", "conversation"]
     
     if success:
-        # Obtener información de la última ejecución exitosa
-        last_execution = None
-        if state["execution_history"]:
-            last_execution = state["execution_history"][-1]
-        
-        # Verificar si es una visualización
-        is_visualization = False
-        is_data_query = False
-        code_executed = ""
-        
-        if last_execution and last_execution["success"]:
-            code_executed = last_execution.get("code", "")
+        # Verificar si ya hay una respuesta directa (consultas generales, memoria)
+        if state.get("result") and data_strategy in ["memory", "general"]:
+            # Ya tiene respuesta generada, solo mostrarla
+            respuesta = state["result"]
+            print(f"\n🤖 Respuesta Final:\n{respuesta}")
             
-            # Detectar visualizaciones
-            is_visualization = any(keyword in code_executed.lower() for keyword in [
-                "plt.", "plot", "hist", "scatter", "bar", "show()", "savefig"
-            ])
-            
-            # Detectar consultas de datos (análisis, conteos, consultas SQL, etc.)
-            is_data_query = any(keyword in code_executed.lower() for keyword in [
-                "count", "sum", "mean", "describe", "value_counts", "groupby", "agg",
-                "select", "where", "group by", "order by", "len(", "shape", "info()",
-                "nunique", "unique", "max", "min", "std", "var"
-            ]) or state.get("sql_results") is not None
-        
-        if is_visualization:
-            # Para visualizaciones: comentar el resultado, NO mostrar código
-            prompt = f"""
-                La consulta del usuario fue: {state['query']}
-
-                Se ejecutó exitosamente código de visualización que generó un gráfico.
-
-                CÓDIGO EJECUTADO (PARA CONTEXTO INTERNO - NO MOSTRAR AL USUARIO):
-                {code_executed}
-
-                RESULTADO OBTENIDO: {state['result']}
-
-                Tu tarea es generar un comentario breve e interpretativo sobre lo que muestra el gráfico generado, SIN incluir código ni explicaciones técnicas.
-
-                Enfócate en:
-                1. Qué tipo de visualización se generó
-                2. Qué información muestra al usuario
-                3. Insights breves sobre los datos visualizados (si es posible inferirlos)
-                4. Confirmar dónde se guardó el archivo
-
-                NO incluyas código Python, explicaciones técnicas ni instrucciones.
-            """
-        
-        elif is_data_query or state.get("sql_results"):
-            # Para consultas que obtuvieron datos específicos
-            datos_obtenidos = ""
-            
-            # Extraer datos de resultados SQL si existen
-            if state.get("sql_results"):
-                sql_data = state["sql_results"]
-                if isinstance(sql_data, dict) and "data" in sql_data:
-                    datos_obtenidos = f"Datos SQL: {sql_data['data'][:3]}..."  # Primeros 3 registros
-                else:
-                    datos_obtenidos = f"Resultados SQL: {str(sql_data)[:200]}..."
-            
-            # O extraer del resultado de código Python
-            elif last_execution and last_execution.get("result"):
-                result_data = last_execution["result"]
-                if isinstance(result_data, str) and len(result_data) > 10:
-                    datos_obtenidos = result_data
-                else:
-                    datos_obtenidos = str(result_data)
-            
-            prompt = f"""
-                La consulta del usuario fue: {state['query']}
-
-                Se ejecutó exitosamente un análisis de datos que obtuvo información específica.
-
-                DATOS OBTENIDOS:
-                {datos_obtenidos}
-
-                CÓDIGO EJECUTADO (PARA CONTEXTO INTERNO - NO MOSTRAR AL USUARIO):
-                {code_executed}
-
-                Tu tarea es generar una respuesta que:
-                1. Confirme qué análisis se realizó
-                2. INCLUYA los datos específicos obtenidos en la respuesta
-                3. Interprete brevemente qué significan esos datos
-                4. Sea clara y directa
-
-                IMPORTANTE:
-                - SÍ incluye los números, conteos, o datos específicos obtenidos
-                - NO incluyas código Python
-                - NO expliques cómo funciona el código
-                - Enfócate en el resultado y su interpretación
-
-                Ejemplo: "He analizado los datos y encontré que hay 1,247 registros en total, de los cuales 623 corresponden a la categoría X y 624 a la categoría Y, mostrando una distribución equilibrada."
-            """
+            # Para consultas de memoria, SÍ guardar (son consultas relevantes)
+            if data_strategy == "memory":
+                skip_memory = False
+            else:
+                # Para consultas generales, NO guardar y terminar aquí
+                state["history"].append(f"Responder → Consulta general - sin actualización de memoria")
+                return state
         
         else:
-            # Para otros análisis: respuesta normal mejorada
-            prompt = f"""
-                Pregunta del usuario: {state['query']}
-                Resultado obtenido: {state['result']}
-                Iteraciones necesarias: {state['iteration_count']}
-                Contexto histórico: {state.get('memory_summary', 'N/A')}
+            # Obtener información de la última ejecución exitosa
+            last_execution = None
+            if state["execution_history"]:
+                last_execution = state["execution_history"][-1]
+            
+            # Verificar si es una visualización
+            is_visualization = False
+            is_data_query = False
+            code_executed = ""
+            
+            if last_execution and last_execution["success"]:
+                code_executed = last_execution.get("code", "")
+                
+                # Detectar visualizaciones
+                is_visualization = any(keyword in code_executed.lower() for keyword in [
+                    "plt.", "plot", "hist", "scatter", "bar", "show()", "savefig"
+                ])
+                
+                # Detectar consultas de datos (análisis, conteos, consultas SQL, etc.)
+                is_data_query = any(keyword in code_executed.lower() for keyword in [
+                    "count", "sum", "mean", "describe", "value_counts", "groupby", "agg",
+                    "select", "where", "group by", "order by", "len(", "shape", "info()",
+                    "nunique", "unique", "max", "min", "std", "var"
+                ]) or state.get("sql_results") is not None
+            
+            if is_visualization:
+                # Para visualizaciones: comentar el resultado, NO mostrar código
+                prompt = f"""
+                    La consulta del usuario fue: {state['query']}
 
-                Genera una respuesta clara sobre el análisis realizado, incluyendo cualquier dato específico que se haya obtenido.
-            """
+                    Se ejecutó exitosamente código de visualización que generó un gráfico.
+
+                    CÓDIGO EJECUTADO (PARA CONTEXTO INTERNO - NO MOSTRAR AL USUARIO):
+                    {code_executed}
+
+                    RESULTADO OBTENIDO: {state['result']}
+
+                    Tu tarea es generar un comentario breve e interpretativo sobre lo que muestra el gráfico generado, SIN incluir código ni explicaciones técnicas.
+
+                    Enfócate en:
+                    1. Qué tipo de visualización se generó
+                    2. Qué información muestra al usuario
+                    3. Insights breves sobre los datos visualizados (si es posible inferirlos)
+                    4. Confirmar dónde se guardó el archivo
+
+                    NO incluyas código Python, explicaciones técnicas ni instrucciones.
+                """
+            
+            elif is_data_query or state.get("sql_results"):
+                # Para consultas que obtuvieron datos específicos
+                datos_obtenidos = ""
+                
+                # Extraer datos de resultados SQL si existen
+                if state.get("sql_results"):
+                    sql_data = state["sql_results"]
+                    if isinstance(sql_data, dict) and "data" in sql_data:
+                        datos_obtenidos = f"Datos SQL: {sql_data['data'][:3]}..."  # Primeros 3 registros
+                    else:
+                        datos_obtenidos = f"Resultados SQL: {str(sql_data)[:200]}..."
+                
+                # O extraer del resultado de código Python
+                elif last_execution and last_execution.get("result"):
+                    result_data = last_execution["result"]
+                    if isinstance(result_data, str) and len(result_data) > 10:
+                        datos_obtenidos = result_data
+                    else:
+                        datos_obtenidos = str(result_data)
+                
+                prompt = f"""
+                    La consulta del usuario fue: {state['query']}
+
+                    Se ejecutó exitosamente un análisis de datos que obtuvo información específica.
+
+                    DATOS OBTENIDOS:
+                    {datos_obtenidos}
+
+                    CÓDIGO EJECUTADO (PARA CONTEXTO INTERNO - NO MOSTRAR AL USUARIO):
+                    {code_executed}
+
+                    Tu tarea es generar una respuesta que:
+                    1. Confirme qué análisis se realizó
+                    2. INCLUYA los datos específicos obtenidos en la respuesta
+                    3. Interprete brevemente qué significan esos datos
+                    4. Sea clara y directa
+
+                    IMPORTANTE:
+                    - SÍ incluye los números, conteos, o datos específicos obtenidos
+                    - NO incluyas código Python
+                    - NO expliques cómo funciona el código
+                    - Enfócate en el resultado y su interpretación
+
+                    Ejemplo: "He analizado los datos y encontré que hay 1,247 registros en total, de los cuales 623 corresponden a la categoría X y 624 a la categoría Y, mostrando una distribución equilibrada."
+                """
+            
+            else:
+                # Para otros análisis: respuesta normal mejorada
+                prompt = f"""
+                    Pregunta del usuario: {state['query']}
+                    Resultado obtenido: {state['result']}
+                    Iteraciones necesarias: {state['iteration_count']}
+                    Contexto histórico: {state.get('memory_summary', 'N/A')}
+
+                    Genera una respuesta clara sobre el análisis realizado, incluyendo cualquier dato específico que se haya obtenido.
+                """
+            
+            respuesta = llm.invoke(prompt).content
+            print(f"\n🤖 Respuesta Final:\n{respuesta}")
+    
     else:
-        # Manejo de errores (código original)
+        # Manejo de errores
         errors_summary = []
         for record in state["execution_history"]:
             if not record["success"]:
@@ -592,36 +642,40 @@ def node_responder(state: AgentState):
 
             Genera una respuesta empática explicando los problemas encontrados y sugerencias.
         """
-
-    respuesta = llm.invoke(prompt).content
-    print(f"\n🤖 Respuesta Final:\n{respuesta}")
+        
+        respuesta = llm.invoke(prompt).content
+        print(f"\n🤖 Respuesta Final:\n{respuesta}")
     
-    # actualizar memoria
-    conversation_record = {
-        "timestamp": datetime.now().isoformat(),
-        "query": state["query"],
-        "success": success,
-        "strategy_used": state.get("data_strategy", "unknown"),
-        "dataset_used": state.get("selected_dataset", "unknown"),
-        "iterations": state["iteration_count"],
-        "errors": [record for record in state["execution_history"] if not record["success"]],
-        "response": respuesta
-    }
-    
-    if not state.get("conversation_history"):
-        state["conversation_history"] = []
-    state["conversation_history"].append(conversation_record)
-    
-    update_user_context(state, conversation_record)
-    update_learned_patterns(state, conversation_record)
-    
-    print("💾 Memoria actualizada con nueva conversación")
-
-    cleaned_state = clean_state_for_serialization(state)
-    
-    for key, value in cleaned_state.items():
-        state[key] = value
-    
-    state["history"].append(f"Responder → Finalizado con {'éxito' if success else 'error'} + memoria actualizada")
+    # ACTUALIZAR MEMORIA solo para consultas relevantes
+    if not skip_memory:
+        conversation_record = {
+            "timestamp": datetime.now().isoformat(),
+            "query": state["query"],
+            "success": success,
+            "strategy_used": state.get("data_strategy", "unknown"),
+            "dataset_used": state.get("selected_dataset", "unknown"),
+            "iterations": state["iteration_count"],
+            "errors": [record for record in state["execution_history"] if not record["success"]],
+            "response": respuesta
+        }
+        
+        if not state.get("conversation_history"):
+            state["conversation_history"] = []
+        state["conversation_history"].append(conversation_record)
+        
+        update_user_context(state, conversation_record)
+        update_learned_patterns(state, conversation_record)
+        
+        print("💾 Memoria actualizada con nueva conversación")
+        
+        cleaned_state = clean_state_for_serialization(state)
+        
+        for key, value in cleaned_state.items():
+            state[key] = value
+        
+        state["history"].append(f"Responder → Finalizado con {'éxito' if success else 'error'} + memoria actualizada")
+    else:
+        print("ℹ️ Consulta general - no se guarda en memoria conversacional")
+        state["history"].append(f"Responder → Consulta general - sin actualización de memoria")
     
     return state

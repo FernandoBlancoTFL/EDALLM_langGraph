@@ -246,3 +246,159 @@ def is_visualization_query(query: str) -> tuple[bool, str]:
             return True, f"Análisis complejo detectado: '{keyword}'"
     
     return False, ""
+
+def is_greeting_query(query: str) -> tuple[bool, str]:
+    """
+    Detecta si la consulta es un saludo simple.
+    Retorna (es_saludo, respuesta_saludo)
+    """
+    query_lower = query.lower().strip()
+    
+    # Saludos comunes
+    greetings = {
+        'hola': '¡Hola! 👋 Soy tu asistente de análisis de datos. ¿En qué puedo ayudarte hoy?',
+        'buenos dias': '¡Buenos días! ☀️ Estoy listo para ayudarte con el análisis de tus datos.',
+        'buenos días': '¡Buenos días! ☀️ Estoy listo para ayudarte con el análisis de tus datos.',
+        'buenas tardes': '¡Buenas tardes! 🌤️ ¿Qué análisis necesitas realizar?',
+        'buenas noches': '¡Buenas noches! 🌙 ¿En qué puedo asistirte?',
+        'buen dia': '¡Buen día! ☀️ Estoy aquí para ayudarte con tus datos.',
+        'buen día': '¡Buen día! ☀️ Estoy aquí para ayudarte con tus datos.',
+        'hey': '¡Hola! 👋 ¿Qué análisis quieres hacer hoy?',
+        'saludos': '¡Saludos! 👋 ¿En qué puedo ayudarte?',
+        'hi': 'Hi! 👋 How can I help you with your data today?',
+        'hello': 'Hello! 👋 Ready to analyze your data!',
+    }
+    
+    # Verificar saludos exactos
+    for greeting, response in greetings.items():
+        if query_lower == greeting or query_lower == greeting + '!' or query_lower == greeting + '.':
+            return True, response
+    
+    # Verificar saludos con palabras adicionales simples (ej: "hola, como estás")
+    first_word = query_lower.split()[0] if query_lower.split() else ""
+    if first_word in greetings and len(query_lower.split()) <= 4:
+        return True, greetings[first_word]
+    
+    return False, ""
+
+
+def is_help_query(query: str) -> tuple[bool, str]:
+    """
+    Detecta si el usuario pregunta qué puede hacer el sistema o pide ayuda.
+    Retorna (es_ayuda, respuesta_ayuda)
+    """
+    query_lower = query.lower().strip()
+    
+    # Palabras clave de ayuda/capacidades
+    help_patterns = [
+        'que puedes hacer', 'qué puedes hacer',
+        'que sabes hacer', 'qué sabes hacer',
+        'que haces', 'qué haces',
+        'como funciona', 'cómo funciona',
+        'como te uso', 'cómo te uso',
+        'que ofreces', 'qué ofreces',
+        'cuales son tus funciones', 'cuáles son tus funciones',
+        'para que sirves', 'para qué sirves',
+        'ayuda', 'help',
+        'que puedo preguntar', 'qué puedo preguntar',
+        'como puedo usarte', 'cómo puedo usarte',
+        'que me puedes decir', 'qué me puedes decir'
+    ]
+    
+    for pattern in help_patterns:
+        if pattern in query_lower:
+            return True, generate_help_response()
+    
+    return False, ""
+
+
+def generate_help_response() -> str:
+    """
+    Genera una respuesta explicando las capacidades del sistema.
+    """
+    response = """¡Hola! 👋 Soy tu asistente de análisis de datos con IA. Aquí está lo que puedo hacer por ti:
+
+📊 **Análisis de Datos:**
+   • Consultas SQL rápidas (conteos, filtros, agregaciones)
+   • Análisis estadísticos complejos con Python/Pandas
+   • Exploración de datasets completos
+
+📈 **Visualizaciones:**
+   • Histogramas, gráficos de barras, dispersión
+   • Gráficos de líneas, boxplots, heatmaps
+   • Cualquier tipo de visualización con matplotlib/seaborn
+
+🧠 **Memoria Conversacional:**
+   • Recuerdo tus consultas anteriores
+   • Aprendo tus preferencias de análisis
+   • Puedes preguntarme sobre nuestras conversaciones pasadas
+
+💡 **Ejemplos de preguntas:**
+   • "¿Cuántas filas tiene el dataset de viajes?"
+   • "Genera un histograma de la columna edad"
+   • "Muéstrame las columnas del dataset de cocodrilos"
+   • "¿Cuál es el promedio de ventas por mes?"
+   • "Visualiza la correlación entre precio y cantidad"
+
+📁 **Datasets disponibles:** Puedo trabajar con todos los datasets cargados en tu base de datos.
+
+¿Qué análisis te gustaría hacer? 🚀"""
+    
+    return response
+
+
+def is_simple_conversation_query(query: str) -> tuple[bool, str]:
+    """
+    Detecta preguntas conversacionales simples que no requieren análisis de datos.
+    Retorna (es_conversación, respuesta)
+    """
+    query_lower = query.lower().strip()
+    
+    # Patrones conversacionales simples
+    simple_conversations = {
+        'como estas': '¡Estoy funcionando perfectamente! 🤖 Listo para analizar tus datos. ¿Qué necesitas?',
+        'cómo estás': '¡Estoy funcionando perfectamente! 🤖 Listo para analizar tus datos. ¿Qué necesitas?',
+        'como te llamas': 'Soy tu asistente de análisis de datos con IA. Puedes llamarme simplemente "Asistente". ¿En qué puedo ayudarte?',
+        'cómo te llamas': 'Soy tu asistente de análisis de datos con IA. Puedes llamarme simplemente "Asistente". ¿En qué puedo ayudarte?',
+        'cual es tu nombre': 'Soy tu asistente de análisis de datos. Mi función es ayudarte a analizar y visualizar datos. ¿Qué análisis necesitas?',
+        'cuál es tu nombre': 'Soy tu asistente de análisis de datos. Mi función es ayudarte a analizar y visualizar datos. ¿Qué análisis necesitas?',
+        'gracias': '¡De nada! 😊 Si necesitas más análisis, aquí estaré.',
+        'muchas gracias': '¡Es un placer ayudarte! 😊 ¿Algo más que pueda hacer por ti?',
+        'perfecto': '¡Genial! 👍 ¿Hay algo más en lo que pueda ayudarte?',
+        'excelente': '¡Me alegra que te sea útil! 🎉 ¿Necesitas algo más?',
+        'ok': '👍 ¿Hay algo más que quieras analizar?',
+        'vale': '👍 ¿Necesitas otro análisis?',
+    }
+    
+    # Verificar coincidencias exactas
+    for pattern, response in simple_conversations.items():
+        if query_lower == pattern or query_lower == pattern + '!' or query_lower == pattern + '.':
+            return True, response
+    
+    return False, ""
+
+
+def is_general_query(query: str) -> tuple[bool, str, str]:
+    """
+    Función principal que detecta cualquier tipo de consulta general (no de datos).
+    Retorna (es_general, tipo, respuesta)
+    Tipos: 'greeting', 'help', 'conversation'
+    """
+    # Verificar en orden de prioridad
+    
+    # 1. Saludos
+    is_greeting, greeting_response = is_greeting_query(query)
+    if is_greeting:
+        return True, 'greeting', greeting_response
+    
+    # 2. Ayuda/Capacidades
+    is_help, help_response = is_help_query(query)
+    if is_help:
+        return True, 'help', help_response
+    
+    # 3. Conversación simple
+    is_conversation, conv_response = is_simple_conversation_query(query)
+    if is_conversation:
+        return True, 'conversation', conv_response
+    
+    return False, '', ''
