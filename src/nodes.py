@@ -507,6 +507,8 @@ def node_responder(state: AgentState):
             # Ya tiene respuesta generada, solo mostrarla
             respuesta = state["result"]
             print(f"\n🤖 Respuesta Final:\n{respuesta}")
+            # NUEVO: Guardar respuesta LLM
+            state["llm_response"] = respuesta
             
             # Para consultas de memoria, SÍ guardar (son consultas relevantes)
             if data_strategy == "memory":
@@ -624,6 +626,9 @@ def node_responder(state: AgentState):
             
             respuesta = llm.invoke(prompt).content
             print(f"\n🤖 Respuesta Final:\n{respuesta}")
+
+            # NUEVO: Guardar respuesta LLM
+            state["llm_response"] = respuesta
     
     else:
         # Manejo de errores
@@ -645,6 +650,9 @@ def node_responder(state: AgentState):
         
         respuesta = llm.invoke(prompt).content
         print(f"\n🤖 Respuesta Final:\n{respuesta}")
+
+        # NUEVO: Guardar la respuesta del LLM en el estado
+        state["llm_response"] = respuesta
     
     # ACTUALIZAR MEMORIA solo para consultas relevantes
     if not skip_memory:

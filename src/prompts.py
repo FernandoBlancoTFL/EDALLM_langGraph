@@ -28,7 +28,12 @@ def build_code_prompt(query: str, execution_history: List[dict] = None, df_info:
         REGLAS IMPORTANTES:
         1. Usa EXCLUSIVAMENTE el DataFrame 'df' que ya está cargado
         2. NO crees ni simules nuevos DataFrames ni datos de ejemplo
-        3. Para gráficos, guarda en './src/outputs/' y usa plt.show()
+        3. Para gráficos:
+           - Usa nombres descriptivos para los archivos
+           - NO incluyas timestamp en el nombre (se agrega automáticamente)
+           - Guarda en './src/outputs/' con nombre simple como: 'histogram_edad.png'
+           - Usa plt.savefig() primero y luego plt.show()
+           - Ejemplo: plt.savefig('./src/outputs/histogram_edad.png', dpi=300, bbox_inches='tight')
         4. Si trabajas con columnas de tiempo, verifica su tipo primero
         5. NO generes comentarios, Type hints o anotaciones en el código. Responde SOLO con código Python ejecutable, sin explicaciones ni markdown
 

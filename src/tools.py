@@ -3,12 +3,75 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import os
 import re
-from typing import List, Optional
+import time
+from typing import Any, List, Optional
 from langchain.agents import Tool
 from langchain_experimental.tools import PythonREPLTool
 import dataset_manager
+from utils import generate_unique_plot_filename
 
 python_repl = PythonREPLTool()
+
+def auto_rename_plot_files(result: Any) -> Any:
+    """
+    Automáticamente detecta y renombra archivos de gráficos recién creados
+    para agregar timestamp único.
+    
+    Args:
+        result: Resultado de la ejecución de código
+    
+    Returns:
+        Resultado actualizado con el nuevo nombre de archivo
+    """
+    try:
+        outputs_dir = "./src/outputs"
+        if not os.path.exists(outputs_dir):
+            return result
+        
+        # Obtener archivos .png en outputs
+        files = [f for f in os.listdir(outputs_dir) if f.endswith('.png')]
+        if not files:
+            return result
+        
+        # Buscar archivos recién creados (últimos 5 segundos)
+        import time
+        current_time = time.time()
+        recent_files = []
+        
+        for filename in files:
+            filepath = os.path.join(outputs_dir, filename)
+            file_mtime = os.path.getmtime(filepath)
+            
+            # Si el archivo fue creado/modificado hace menos de 5 segundos
+            if current_time - file_mtime < 5:
+                recent_files.append((filename, filepath))
+        
+        # Renombrar archivos sin timestamp
+        for filename, filepath in recent_files:
+            # Verificar si ya tiene timestamp (patrón: _YYYYMMDD_HHMMSS)
+            if re.search(r'_\d{8}_\d{6}\.png$', filename):
+                continue  # Ya tiene timestamp, no hacer nada
+            
+            # Extraer nombre base (sin .png)
+            base_name = filename.replace('.png', '')
+            
+            # Generar nuevo nombre con timestamp
+            unique_filename = generate_unique_plot_filename(base_name)
+            new_filepath = os.path.join(outputs_dir, unique_filename)
+            
+            # Renombrar el archivo
+            os.rename(filepath, new_filepath)
+            print(f"🔄 Archivo renombrado: {filename} → {unique_filename}")
+            
+            # Actualizar el resultado si menciona el archivo antiguo
+            if result and isinstance(result, str):
+                result = result.replace(filename, unique_filename)
+        
+        return result
+        
+    except Exception as e:
+        print(f"⚠️ Error al renombrar archivos: {e}")
+        return result
 
 def run_python_with_df(code: str, error_context: Optional[str] = None):
     """
@@ -86,6 +149,9 @@ def run_python_with_df(code: str, error_context: Optional[str] = None):
         else:
             exec(code, global_vars, local_vars)
             result = None
+
+        # NUEVO: Renombrar archivos de gráficos generados sin timestamp
+        result = auto_rename_plot_files(result)
 
         return {
             "success": True,
@@ -192,10 +258,12 @@ def plot_histogram(column: str):
     plt.ylabel("Frecuencia", fontsize=12)
     plt.grid(axis="y", alpha=0.5)
 
-    file_path = f"outputs/histogram_{column}.png"
+    # MODIFICADO: Usar nombre único con timestamp
+    unique_filename = generate_unique_plot_filename(f"histogram_{column}")
+    file_path = f"./src/outputs/{unique_filename}"
     plt.savefig(file_path, dpi=300, bbox_inches="tight")
     plt.show()
-    return f"✅ Histograma generado y guardado en {file_path}"
+    return f"✅ Histograma generado y guardado en outputs/{unique_filename}"
 
 def plot_correlation_heatmap(_):
     """Genera un heatmap de correlaciones entre variables numéricas."""
@@ -208,10 +276,12 @@ def plot_correlation_heatmap(_):
     sns.heatmap(numeric_cols.corr(), annot=True, cmap="coolwarm", fmt=".2f")
     plt.title("Mapa de calor de correlaciones", fontsize=16)
 
-    file_path = "./src/outputs/correlation_heatmap.png"
+    # MODIFICADO: Usar nombre único con timestamp
+    unique_filename = generate_unique_plot_filename("correlation_heatmap")
+    file_path = f"./src/outputs/{unique_filename}"
     plt.savefig(file_path, dpi=300, bbox_inches="tight")
     plt.show()
-    return f"✅ Heatmap de correlaciones generado y guardado en {file_path}"
+    return f"✅ Heatmap de correlaciones generado y guardado en outputs/{unique_filename}"
 
 def plot_time_series(_):
     """Genera una serie temporal de la cantidad de viajes por día (si existe columna Date)."""
@@ -227,10 +297,12 @@ def plot_time_series(_):
     plt.ylabel("Cantidad de viajes", fontsize=12)
     plt.grid(True, alpha=0.5)
 
-    file_path = "./src/outputs/time_series.png"
+    # MODIFICADO: Usar nombre único con timestamp
+    unique_filename = generate_unique_plot_filename("time_series")
+    file_path = f"./src/outputs/{unique_filename}"
     plt.savefig(file_path, dpi=300, bbox_inches="tight")
     plt.show()
-    return f"✅ Serie temporal generada y guardada en {file_path}"
+    return f"✅ Serie temporal generada y guardada en outputs/{unique_filename}"
 
 def plot_payment_method_distribution(_):
     """Genera un gráfico de barras de los métodos de pago ordenados por frecuencia."""
@@ -247,10 +319,12 @@ def plot_payment_method_distribution(_):
     plt.xticks(rotation=45, ha="right")
     plt.grid(axis="y", alpha=0.5)
 
-    file_path = "./src/outputs/payment_method_distribution.png"
+    # MODIFICADO: Usar nombre único con timestamp
+    unique_filename = generate_unique_plot_filename("payment_method_distribution")
+    file_path = f"./src/outputs/{unique_filename}"
     plt.savefig(file_path, dpi=300, bbox_inches="tight")
     plt.show()
-    return f"✅ Gráfico de métodos de pago generado y guardado en {file_path}"
+    return f"✅ Gráfico de métodos de pago generado y guardado en outputs/{unique_filename}"
 
 # Lista de herramientas
 tools = [
