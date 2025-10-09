@@ -89,6 +89,7 @@ def nodo_estrategia_datos(state: AgentState):
             state["available_datasets"],
             state["user_context"]
         )
+        state["selected_dataset"] = selected_dataset
         if selected_dataset:
             state["selected_dataset"] = selected_dataset
             state["dataset_context"] = state["available_datasets"][selected_dataset]
@@ -258,6 +259,16 @@ def nodo_sql_executor(state: AgentState):
     """NUEVO: Ejecuta consultas SQL directamente en la base de datos"""
     
     print("🗃️ Ejecutando consulta SQL...")
+
+    # Obtener metadatos y nombre real de tabla
+    table_metadata = get_table_metadata_light(state['selected_dataset'])
+    
+    # NUEVO: Usar el nombre real de la tabla si está disponible
+    actual_table_name = table_metadata.get('actual_table_name', state['selected_dataset'])
+    
+    if actual_table_name != state['selected_dataset']:
+        print(f"🔄 Usando tabla real: {actual_table_name}")
+        state['selected_dataset'] = actual_table_name
     
     # Obtener conexión
     conn = data_connection  # Usar la conexión global de datos

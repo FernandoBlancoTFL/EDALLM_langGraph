@@ -1,5 +1,6 @@
 import os
 import re
+import hashlib
 import pandas as pd
 from datetime import datetime
 from dataset_manager import list_stored_tables
@@ -191,3 +192,45 @@ def get_plot_metadata(filename: str) -> dict:
     
     return metadata
 
+def calculate_file_hash(file_content: bytes, algorithm: str = 'sha256') -> str:
+    """
+    Calcula el hash de un archivo basándose en su contenido.
+    
+    Args:
+        file_content: Contenido del archivo en bytes
+        algorithm: Algoritmo de hash ('md5', 'sha1', 'sha256')
+    
+    Returns:
+        String con el hash hexadecimal del archivo
+    
+    Example:
+        >>> content = b"Hello World"
+        >>> calculate_file_hash(content)
+        'a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e'
+    """
+    if algorithm == 'md5':
+        hasher = hashlib.md5()
+    elif algorithm == 'sha1':
+        hasher = hashlib.sha1()
+    elif algorithm == 'sha256':
+        hasher = hashlib.sha256()
+    else:
+        raise ValueError(f"Algoritmo no soportado: {algorithm}")
+    
+    hasher.update(file_content)
+    return hasher.hexdigest()
+
+def verify_file_hash(file_content: bytes, expected_hash: str, algorithm: str = 'sha256') -> bool:
+    """
+    Verifica si el hash de un archivo coincide con un hash esperado.
+    
+    Args:
+        file_content: Contenido del archivo en bytes
+        expected_hash: Hash esperado en formato hexadecimal
+        algorithm: Algoritmo de hash usado
+    
+    Returns:
+        True si el hash coincide, False en caso contrario
+    """
+    calculated_hash = calculate_file_hash(file_content, algorithm)
+    return calculated_hash == expected_hash

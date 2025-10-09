@@ -213,7 +213,8 @@ def list_stored_tables(connection=None):
                 'checkpoint_blobs', 
                 'checkpoint_migrations', 
                 'checkpoint_writes', 
-                'checkpoints'
+                'checkpoints',
+                'document_registry'
             }
 
             dataset_tables = []
@@ -617,7 +618,7 @@ def initialize_dataset_on_startup():
 def ensure_dataset_loaded(state=None):
     """
     Función para cargar el dataset solo cuando sea necesario.
-    Ahora respeta el dataset seleccionado en el estado.
+    MEJORADO: Ahora mapea automáticamente nombres parciales al nombre completo de la tabla.
     """
     global dataset_info, df, dataset_loaded
     
@@ -641,17 +642,6 @@ def ensure_dataset_loaded(state=None):
     
     print(f"🔄 Cargando dataset: {target_dataset}")
     
-    # Buscar configuración del dataset objetivo
-    dataset_config = None
-    for config in DATASETS_TO_PROCESS:
-        if config["table_name"] == target_dataset:
-            dataset_config = config
-            break
-    
-    if not dataset_config:
-        print(f"❌ Configuración no encontrada para: {target_dataset}")
-        return False
-    
     # Crear conexión temporal
     dataset_connection = None
     try:
@@ -661,66 +651,82 @@ def ensure_dataset_loaded(state=None):
         print("🔗 Conexión temporal creada para dataset")
     except Exception as e:
         print(f"⚠️ Error creando conexión: {e}")
-        dataset_connection = None
+        return False
     
-    # Intentar cargar desde BD primero
-    if dataset_connection and check_dataset_table_exists(
-        dataset_connection, 
-        dataset_config["table_name"], 
-        dataset_config["table_schema"]
-    ):
-        print(f"🔄 Cargando {target_dataset} desde PostgreSQL...")
-        try:
-            with dataset_connection.cursor() as cursor:
-                cursor.execute(f"SELECT * FROM {dataset_config['table_schema']}.{dataset_config['table_name']}")
-                rows = cursor.fetchall()
-                columns = [desc[0] for desc in cursor.description]
-                df = pd.DataFrame(rows, columns=columns)
+    try:
+        # MEJORADO: Buscar la tabla real (puede ser nombre parcial)
+        actual_table_name = target_dataset
+        
+        with dataset_connection.cursor() as cursor:
+            # Verificar si existe exactamente como se pasó
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name = %s
+                )
+            """, (target_dataset,))
+            table_exists = cursor.fetchone()[0]
+            
+            if not table_exists:
+                # Buscar tabla que empiece con el nombre dado
+                print(f"🔍 Buscando tabla que coincida con '{target_dataset}'...")
                 
-                dataset_info = {
-                    "columns": list(df.columns),
-                    "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
-                    "row_count": len(df),
-                    "table_name": target_dataset
-                }
-                dataset_loaded = True
-                print(f"✅ Dataset {target_dataset} cargado desde BD: {df.shape}")
+                cursor.execute("""
+                    SELECT table_name 
+                    FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name LIKE %s
+                    AND table_name NOT IN ('document_registry', 'checkpoints', 'checkpoint_writes')
+                    LIMIT 1
+                """, (target_dataset + '%',))
                 
-                if dataset_connection:
-                    dataset_connection.close()
-                return True
-        except Exception as e:
-            print(f"❌ Error cargando desde BD: {e}")
-    else:
-        print(f"🔍 Tabla '{target_dataset}' no existe en BD")
-    
-    # Fallback: cargar desde Excel
-    if os.path.exists(dataset_config["excel_path"]):
-        print(f"📂 Cargando archivo Excel: {dataset_config['excel_path']}")
-        try:
-            df = pd.read_excel(dataset_config["excel_path"])
+                result = cursor.fetchone()
+                if result:
+                    actual_table_name = result[0]
+                    print(f"🔄 Mapeado: '{target_dataset}' → '{actual_table_name}'")
+                    # IMPORTANTE: Actualizar el estado con el nombre real
+                    if state:
+                        state["selected_dataset"] = actual_table_name
+                else:
+                    print(f"❌ Tabla '{target_dataset}' no existe en la BD")
+                    return False
+        
+        # Cargar desde la BD usando el nombre real
+        print(f"🔄 Cargando '{actual_table_name}' desde PostgreSQL...")
+        
+        with dataset_connection.cursor() as cursor:
+            # Cargar todos los datos de la tabla
+            cursor.execute(f'SELECT * FROM public."{actual_table_name}"')
+            rows = cursor.fetchall()
+            columns = [desc[0] for desc in cursor.description]
+            df = pd.DataFrame(rows, columns=columns)
+            
+            # Eliminar columnas del sistema si existen
+            system_columns = ['created_at', 'semantic_description']
+            for col in system_columns:
+                if col in df.columns:
+                    df = df.drop(columns=[col])
+            
             dataset_info = {
                 "columns": list(df.columns),
                 "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
                 "row_count": len(df),
-                "table_name": target_dataset
+                "table_name": actual_table_name  # Usar el nombre real
             }
             dataset_loaded = True
-            print(f"📊 Excel cargado: {df.shape[0]} filas, {df.shape[1]} columnas")
-            
-            if dataset_connection:
-                dataset_connection.close()
+            print(f"✅ Dataset '{actual_table_name}' cargado desde BD: {df.shape}")
             return True
-        except Exception as e:
-            print(f"❌ Error cargando Excel: {e}")
-    else:
-        print(f"❌ Archivo Excel no encontrado: {dataset_config['excel_path']}")
-    
-    if dataset_connection:
-        dataset_connection.close()
-    
-    print(f"❌ No se pudo cargar el dataset: {target_dataset}")
-    return False
+            
+    except Exception as e:
+        print(f"❌ Error cargando dataset desde BD: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+        
+    finally:
+        if dataset_connection:
+            dataset_connection.close()
 
 def load_specific_dataset(table_name: str, connection=None):
     """

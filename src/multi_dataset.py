@@ -16,6 +16,8 @@ def get_all_available_datasets(connection=None):
     
     # 1. Obtener tablas de la BD
     stored_tables = list_stored_tables(conn)
+
+    print(stored_tables)
     
     for table_name in stored_tables:
         table_info = get_dataset_table_info_by_name(table_name, conn)
@@ -217,7 +219,7 @@ def get_semantic_descriptions_from_db(connection=None):
 def identify_dataset_with_llm(query: str, available_datasets: dict, semantic_descriptions: dict, user_context: dict) -> str:
     """
     Usa LLM para seleccionar el dataset más apropiado basándose en descripciones semánticas.
-    CORREGIDO: Maneja valores None en common_datasets
+    CORREGIDO: Retorna siempre el nombre real de la tabla (con sufijo).
     """
     if not available_datasets:
         print("⚠️ No hay datasets disponibles")
@@ -225,6 +227,8 @@ def identify_dataset_with_llm(query: str, available_datasets: dict, semantic_des
     
     # Construir lista de datasets con sus descripciones
     datasets_info = []
+    table_name_mapping = {}  # NUEVO: Mapeo de nombre amigable → nombre real
+    
     for table_name, info in available_datasets.items():
         semantic_desc = semantic_descriptions.get(table_name, info.get("description", "Sin descripción"))
         
@@ -233,18 +237,23 @@ def identify_dataset_with_llm(query: str, available_datasets: dict, semantic_des
         valid_columns = [col for col in main_columns if col is not None and col != ""]
         columns_str = ', '.join(valid_columns) if valid_columns else "N/A"
         
+        # Obtener nombre amigable (sin sufijo)
+        friendly_name = info.get('friendly_name', table_name)
+        
+        # NUEVO: Guardar mapeo
+        table_name_mapping[friendly_name.lower()] = table_name
+        table_name_mapping[table_name.lower()] = table_name  # También mapear el nombre completo
+        
         datasets_info.append(f"""
-                                Dataset: {table_name}
-                                Nombre amigable: {info.get('friendly_name', table_name)}
-                                Descripción: {semantic_desc}
-                                Columnas principales: {columns_str}
-                                Cantidad de filas: {info.get('row_count', 'N/A')}
-                            """)
+Dataset ID: {table_name}
+Descripción: {semantic_desc}
+Columnas principales: {columns_str}
+Cantidad de filas: {info.get('row_count', 'N/A')}
+""")
     
     # Considerar historial del usuario
     common_datasets_info = ""
     if user_context.get("common_datasets"):
-        # CORRECCIÓN: Filtrar valores None antes de hacer join
         common_datasets = user_context['common_datasets'][:3]
         valid_common = [ds for ds in common_datasets if ds is not None and ds != ""]
         if valid_common:
@@ -266,8 +275,10 @@ INSTRUCCIONES:
 - Si el usuario menciona análisis previos, considera los datasets más usados
 - Si hay ambigüedad, elige el dataset más relevante semánticamente
 
-Responde SOLO con el nombre exacto de la tabla (table_name), sin explicaciones adicionales.
-Ejemplo de respuesta válida: dataset_rides
+IMPORTANTE: Responde SOLO con el Dataset ID completo (ejemplo: crocodile_dataset_303cf324)
+NO uses nombres cortos o amigables. Usa el ID exacto que aparece en "Dataset ID:" arriba.
+
+Responde SOLO con el Dataset ID, sin explicaciones:
 """
     
     try:
@@ -275,20 +286,47 @@ Ejemplo de respuesta válida: dataset_rides
         response = llm.invoke(prompt).content.strip()
         
         # Limpiar respuesta (puede venir con comillas, espacios, etc.)
-        selected = response.replace('"', '').replace("'", "").strip()
+        selected = response.replace('"', '').replace("'", "").strip().lower()
         
-        # Verificar que la respuesta sea válida
-        if selected in available_datasets:
-            print(f"🤖 LLM seleccionó dataset: {selected}")
-            print(f"   Razón: Mejor coincidencia semántica con la consulta")
-            return selected
+        # NUEVO: Intentar mapear la respuesta al nombre real
+        actual_table_name = None
+        
+        # 1. Verificar si la respuesta es exactamente un nombre de tabla
+        if selected in [t.lower() for t in available_datasets.keys()]:
+            # Encontrar el nombre real (con mayúsculas correctas)
+            for table in available_datasets.keys():
+                if table.lower() == selected:
+                    actual_table_name = table
+                    break
+        
+        # 2. Si no, buscar en el mapeo de nombres amigables
+        elif selected in table_name_mapping:
+            actual_table_name = table_name_mapping[selected]
+        
+        # 3. Buscar tablas que empiecen con el nombre dado (fuzzy match)
         else:
-            print(f"⚠️ LLM respondió con dataset inválido: {selected}")
+            for table in available_datasets.keys():
+                if table.lower().startswith(selected):
+                    actual_table_name = table
+                    break
+        
+        # Verificar resultado
+        if actual_table_name:
+            print(f"🤖 LLM seleccionó dataset: {actual_table_name}")
+            if actual_table_name.lower() != selected:
+                print(f"   Mapeado desde: {selected}")
+            print(f"   Razón: Mejor coincidencia semántica con la consulta")
+            return actual_table_name
+        else:
+            print(f"⚠️ LLM respondió con dataset inválido: {response}")
+            print(f"   Datasets disponibles: {list(available_datasets.keys())}")
             print(f"   Fallback: usando primer dataset disponible")
             return list(available_datasets.keys())[0]
             
     except Exception as e:
         print(f"❌ Error en selección con LLM: {e}")
+        import traceback
+        traceback.print_exc()
         # Fallback a método tradicional
         return identify_dataset_from_query(query, available_datasets)
 
