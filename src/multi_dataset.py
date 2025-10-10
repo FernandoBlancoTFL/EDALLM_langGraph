@@ -4,31 +4,28 @@ import psycopg
 from typing import Any
 from dataset_manager import list_stored_tables, get_dataset_table_info_by_name
 from database import load_db_config
-from config import DATASETS_TO_PROCESS
 
 def get_all_available_datasets(connection=None):
     """
-    Obtiene metadatos completos de todos los datasets disponibles (BD + archivos Excel).
-    Combina información de tablas en BD y archivos Excel disponibles.
+    Obtiene metadatos completos de todos los datasets disponibles en la BD.
+    MODIFICADO: Ya no busca archivos Excel, solo trabaja con tablas en BD subidas por usuarios.
     """
     conn = connection
     available_datasets = {}
     
-    # 1. Obtener tablas de la BD
+    # Obtener todas las tablas de la BD
     stored_tables = list_stored_tables(conn)
-
-    print(stored_tables)
+    
+    if not stored_tables:
+        print("📁 No hay datasets disponibles en la BD")
+        print("💡 Los usuarios deben subir documentos vía /api/documents/upload")
+        return available_datasets
+    
+    print(f"📊 {len(stored_tables)} dataset(s) encontrado(s) en BD")
     
     for table_name in stored_tables:
         table_info = get_dataset_table_info_by_name(table_name, conn)
         if table_info:
-            # Buscar configuración correspondiente
-            dataset_config = None
-            for config in DATASETS_TO_PROCESS:
-                if config["table_name"] == table_name:
-                    dataset_config = config
-                    break
-            
             available_datasets[table_name] = {
                 "source": "database",
                 "table_name": table_name,
@@ -37,30 +34,10 @@ def get_all_available_datasets(connection=None):
                 "row_count": table_info["row_count"],
                 "main_columns": identify_key_columns(table_info["columns"]),
                 "description": generate_dataset_description(table_name, table_info["columns"]),
-                "excel_path": dataset_config["excel_path"] if dataset_config else None,
                 "keywords": generate_dataset_keywords(table_name, table_info["columns"])
             }
-    
-    # 2. Agregar archivos Excel que no estén en BD
-    for config in DATASETS_TO_PROCESS:
-        table_name = config["table_name"]
-        if table_name not in available_datasets and os.path.exists(config["excel_path"]):
-            try:
-                # Leer solo las primeras filas para metadatos
-                df_sample = pd.read_excel(config["excel_path"], nrows=5)
-                available_datasets[table_name] = {
-                    "source": "excel_file",
-                    "table_name": table_name,
-                    "friendly_name": get_friendly_dataset_name(table_name),
-                    "columns": list(df_sample.columns)[:10],
-                    "row_count": "Estimado: " + str(len(df_sample) * 100),  # Estimación
-                    "main_columns": identify_key_columns(list(df_sample.columns)),
-                    "description": generate_dataset_description(table_name, list(df_sample.columns)),
-                    "excel_path": config["excel_path"],
-                    "keywords": generate_dataset_keywords(table_name, list(df_sample.columns))
-                }
-            except Exception as e:
-                print(f"⚠️ Error leyendo Excel {config['excel_path']}: {e}")
+        else:
+            print(f"⚠️ No se pudo obtener información de la tabla: {table_name}")
     
     return available_datasets
 
@@ -219,7 +196,7 @@ def get_semantic_descriptions_from_db(connection=None):
 def identify_dataset_with_llm(query: str, available_datasets: dict, semantic_descriptions: dict, user_context: dict) -> str:
     """
     Usa LLM para seleccionar el dataset más apropiado basándose en descripciones semánticas.
-    CORREGIDO: Retorna siempre el nombre real de la tabla (con sufijo).
+    MODIFICADO: Retorna None si no encuentra un dataset válido en lugar de usar fallback.
     """
     if not available_datasets:
         print("⚠️ No hay datasets disponibles")
@@ -285,15 +262,14 @@ Responde SOLO con el Dataset ID, sin explicaciones:
         from nodes import llm
         response = llm.invoke(prompt).content.strip()
         
-        # Limpiar respuesta (puede venir con comillas, espacios, etc.)
+        # Limpiar respuesta
         selected = response.replace('"', '').replace("'", "").strip().lower()
         
-        # NUEVO: Intentar mapear la respuesta al nombre real
+        # Intentar mapear la respuesta al nombre real
         actual_table_name = None
         
         # 1. Verificar si la respuesta es exactamente un nombre de tabla
         if selected in [t.lower() for t in available_datasets.keys()]:
-            # Encontrar el nombre real (con mayúsculas correctas)
             for table in available_datasets.keys():
                 if table.lower() == selected:
                     actual_table_name = table
@@ -310,7 +286,7 @@ Responde SOLO con el Dataset ID, sin explicaciones:
                     actual_table_name = table
                     break
         
-        # Verificar resultado
+        # MODIFICADO: No usar fallback, retornar None si no hay coincidencia
         if actual_table_name:
             print(f"🤖 LLM seleccionó dataset: {actual_table_name}")
             if actual_table_name.lower() != selected:
@@ -318,17 +294,15 @@ Responde SOLO con el Dataset ID, sin explicaciones:
             print(f"   Razón: Mejor coincidencia semántica con la consulta")
             return actual_table_name
         else:
-            print(f"⚠️ LLM respondió con dataset inválido: {response}")
-            print(f"   Datasets disponibles: {list(available_datasets.keys())}")
-            print(f"   Fallback: usando primer dataset disponible")
-            return list(available_datasets.keys())[0]
+            print(f"❌ No se encontró dataset válido para: '{response}'")
+            print(f"   Datasets disponibles en BD: {list(available_datasets.keys())}")
+            return None  # CAMBIO CRÍTICO: Retornar None en lugar de fallback
             
     except Exception as e:
         print(f"❌ Error en selección con LLM: {e}")
         import traceback
         traceback.print_exc()
-        # Fallback a método tradicional
-        return identify_dataset_from_query(query, available_datasets)
+        return None
 
 def identify_dataset_from_query(query: str, available_datasets: dict) -> str:
     """

@@ -12,12 +12,17 @@ def route_after_classification(state: AgentState):
     print(f"   Action: {action}")
     print(f"   Strategy: {data_strategy}")
     
-    # Manejar consultas generales (saludos, ayuda) - ir directo a responder
+    # NUEVO: Manejar casos donde no hay dataset disponible/válido
+    if data_strategy in ["no_dataset", "no_match"]:
+        print("   → Routing to: responder (sin dataset)")
+        return "responder"
+    
+    # Manejar consultas generales (saludos, ayuda)
     if data_strategy == "general":
         print("   → Routing to: responder (general)")
         return "responder"
     
-    # Manejar consultas de memoria - ir directo a responder
+    # Manejar consultas de memoria
     if data_strategy == "memory":
         print("   → Routing to: responder (memoria)")
         return "responder"

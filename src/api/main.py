@@ -9,7 +9,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from api.routes import chat, documents
 from database import create_database_if_not_exists, test_target_database_connection, setup_data_connection, create_document_registry_table
-from dataset_manager import initialize_dataset_on_startup
 from checkpoints import setup_postgres_saver
 
 # Crear aplicación FastAPI
@@ -58,15 +57,10 @@ async def startup_event():
 
     # Crear tabla de registro de documentos
     print("📝 Creando tabla de registro de documentos...")
-    if not create_document_registry_table():
-        print("⚠️ Advertencia: No se pudo crear document_registry")
-    else:
-        print("✅ document_registry configurada correctamente")
+    create_document_registry_table()
     
-    # Inicializar datasets
-    print("🔄 Inicializando sistema de dataset...")
-    if not initialize_dataset_on_startup():
-        print("⚠️ Advertencia: Error en inicialización del dataset")
+    # ELIMINADO: Ya no se inicializan datasets automáticamente
+    print("📁 Sistema configurado para trabajar solo con documentos subidos vía API")
     
     # Configurar PostgresSaver para memoria
     postgres_saver = setup_postgres_saver()
@@ -74,6 +68,7 @@ async def startup_event():
     print("✅ Sistema inicializado correctamente")
     print(f"🧠 Memoria conversacional: {'ACTIVADA' if postgres_saver else 'DESACTIVADA'}")
     print("📡 API lista para recibir requests en /api/chat")
+    print("📤 Los usuarios deben subir documentos vía /api/documents/upload")
 
 @app.get("/")
 async def root():

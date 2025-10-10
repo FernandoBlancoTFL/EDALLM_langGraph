@@ -3,7 +3,7 @@ import pandas as pd
 import psycopg
 from typing import Optional
 from database import load_db_config, data_connection
-from config import DATASETS_TO_PROCESS, DATASET_CONFIG, ENABLE_AUTO_SAVE_TO_DB
+from config import ENABLE_AUTO_SAVE_TO_DB
 
 # Variables globales para el dataset
 dataset_info = None
@@ -48,9 +48,10 @@ def sanitize_column_name(column_name: str) -> str:
     
     return clean_name or 'unnamed_column'
 
-def check_dataset_table_exists(connection=None, table_name=None, table_schema=None):
+def check_dataset_table_exists(connection=None, table_name=None, table_schema='public'):
     """
     Verifica si una tabla específica existe en PostgreSQL.
+    MODIFICADO: Ya no usa valores por defecto de config, requiere table_name explícito.
     """
     conn = connection
     
@@ -58,9 +59,9 @@ def check_dataset_table_exists(connection=None, table_name=None, table_schema=No
         print("⚠️ No se puede verificar tabla: no hay conexión disponible")
         return False
     
-    # Usar valores por defecto si no se especifican
-    table_name = table_name or DATASET_CONFIG["table_name"]
-    table_schema = table_schema or DATASET_CONFIG["table_schema"]
+    if table_name is None:
+        print("⚠️ No se especificó nombre de tabla para verificar")
+        return False
     
     try:
         with conn.cursor() as cursor:
@@ -73,56 +74,12 @@ def check_dataset_table_exists(connection=None, table_name=None, table_schema=No
             """, (table_schema, table_name))
             
             exists = cursor.fetchone()[0]
-            print(f"🔍 Tabla '{table_name}' {'existe' if exists else 'no existe'} en BD")
+            # print(f"🔍 Tabla '{table_name}' {'existe' if exists else 'no existe'} en BD")
             return exists
             
     except Exception as e:
         print(f"⚠️ Error verificando tabla {table_name}: {e}")
         return False
-
-def get_dataset_table_info(connection=None):
-    """
-    Obtiene información de la tabla del dataset.
-    Acepta una conexión opcional.
-    """
-    conn = connection
-    
-    if conn is None:
-        return None
-    
-    try:
-        with conn.cursor() as cursor:
-            # Obtener información de columnas
-            cursor.execute("""
-                SELECT column_name, data_type, is_nullable
-                FROM information_schema.columns
-                WHERE table_schema = %s AND table_name = %s
-                ORDER BY ordinal_position
-            """, (DATASET_CONFIG["table_schema"], DATASET_CONFIG["table_name"]))
-            
-            columns_info = cursor.fetchall()
-            
-            # Obtener conteo de filas
-            cursor.execute(f"""
-                SELECT COUNT(*) FROM {DATASET_CONFIG["table_schema"]}.{DATASET_CONFIG["table_name"]}
-            """)
-            
-            row_count = cursor.fetchone()[0]
-            
-            # Formatear información
-            columns = [col[0] for col in columns_info]
-            dtypes = {col[0]: col[1] for col in columns_info}
-            
-            return {
-                "columns": columns,
-                "dtypes": dtypes,
-                "row_count": row_count,
-                "table_name": DATASET_CONFIG["table_name"]
-            }
-            
-    except Exception as e:
-        print(f"⚠️ Error obteniendo información de tabla: {e}")
-        return None
 
 def get_dataset_table_info_by_name(table_name, connection=None):
     """
@@ -234,10 +191,10 @@ def list_stored_tables(connection=None):
         if temp_connection:
             conn.close()
 
-def create_dataset_table_from_df(df: pd.DataFrame, connection=None, table_name=None, table_schema=None, semantic_description=None):
+def create_dataset_table_from_df(df: pd.DataFrame, connection=None, table_name=None, table_schema='public', semantic_description=None):
     """
     Crea una tabla en PostgreSQL desde un DataFrame.
-    MODIFICADO: Ahora incluye descripción semántica en metadatos.
+    MODIFICADO: Requiere table_name explícito, no usa valores por defecto de config.
     """
     conn = connection
     
@@ -245,9 +202,9 @@ def create_dataset_table_from_df(df: pd.DataFrame, connection=None, table_name=N
         print("⚠️ No se puede crear tabla: no hay conexión disponible")
         return False, {}
     
-    # Usar valores por defecto si no se especifican
-    table_name = table_name or DATASET_CONFIG["table_name"]
-    table_schema = table_schema or DATASET_CONFIG["table_schema"]
+    if table_name is None:
+        print("⚠️ No se especificó nombre de tabla")
+        return False, {}
     
     try:
         postgres_types = get_postgres_data_types()
@@ -300,7 +257,6 @@ def create_dataset_table_from_df(df: pd.DataFrame, connection=None, table_name=N
             cursor.execute(create_table_sql)
             
             # Si se proporcionó descripción, agregarla como comentario de tabla
-            # CORREGIDO: Usar f-string en lugar de placeholder para DDL
             if semantic_description:
                 # Escapar comillas simples en la descripción
                 escaped_description = semantic_description.replace("'", "''")
@@ -323,10 +279,10 @@ def create_dataset_table_from_df(df: pd.DataFrame, connection=None, table_name=N
             conn.rollback()
         return False, {}
 
-def insert_dataframe_to_table(df: pd.DataFrame, column_mapping: dict, connection=None, table_name=None, table_schema=None, semantic_description=None):
+def insert_dataframe_to_table(df: pd.DataFrame, column_mapping: dict, connection=None, table_name=None, table_schema='public', semantic_description=None):
     """
     Inserta los datos del DataFrame en la tabla PostgreSQL.
-    MODIFICADO: Ahora inserta la descripción semántica en cada fila.
+    MODIFICADO: Requiere table_name explícito, no usa valores por defecto de config.
     """
     conn = connection
     
@@ -334,9 +290,9 @@ def insert_dataframe_to_table(df: pd.DataFrame, column_mapping: dict, connection
         print("⚠️ No se puede insertar datos: no hay conexión disponible")
         return False
     
-    # Usar valores por defecto si no se especifican
-    table_name = table_name or DATASET_CONFIG["table_name"]
-    table_schema = table_schema or DATASET_CONFIG["table_schema"]
+    if table_name is None:
+        print("⚠️ No se especificó nombre de tabla")
+        return False
     
     try:
         # Renombrar columnas según el mapeo
@@ -385,7 +341,7 @@ def insert_dataframe_to_table(df: pd.DataFrame, column_mapping: dict, connection
             
             # Verificar inserción
             cursor.execute(f"SELECT COUNT(*) FROM {table_schema}.{table_name}")
-            inserted_count = cursor.fetchone()[0] - 1  # Restar 1 por el ID serial
+            inserted_count = cursor.fetchone()[0]
             
             print(f"✅ {inserted_count} filas insertadas correctamente en '{table_name}'")
             return True
@@ -396,74 +352,10 @@ def insert_dataframe_to_table(df: pd.DataFrame, column_mapping: dict, connection
             conn.rollback()
         return False
 
-def load_excel_to_postgres(connection=None, force_load=False):
-    """
-    Función principal que carga el archivo Excel a PostgreSQL si no existe.
-    Acepta una conexión opcional y un flag para forzar carga.
-    """
-    global ENABLE_AUTO_SAVE_TO_DB
-
-    # Verificar si ya existe la tabla SIEMPRE (independiente de ENABLE_AUTO_SAVE_TO_DB)
-    if check_dataset_table_exists(connection):
-        print("✅ Dataset ya está cargado en PostgreSQL")
-        table_info = get_dataset_table_info(connection)
-        if table_info:
-            return table_info, True  # True indica que se cargó desde BD
-        else:
-            print("⚠️ Error obteniendo info de tabla existente")
-    
-    # Si no existe, cargar Excel y crear tabla (solo si está activado)
-    print(f"📂 Cargando archivo Excel: {DATASET_CONFIG['excel_path']}")
-    
-    try:
-        # Verificar que el archivo existe
-        if not os.path.exists(DATASET_CONFIG['excel_path']):
-            print(f"❌ Archivo Excel no encontrado: {DATASET_CONFIG['excel_path']}")
-            return None, False
-        
-        # Cargar DataFrame
-        df_temp = pd.read_excel(DATASET_CONFIG['excel_path'])
-        print(f"📊 Excel cargado: {df_temp.shape[0]} filas, {df_temp.shape[1]} columnas")
-        
-        # Si el guardado está desactivado, retornar solo info del Excel
-        if not ENABLE_AUTO_SAVE_TO_DB:
-            table_info = {
-                "columns": list(df_temp.columns),
-                "dtypes": {col: str(dtype) for col, dtype in df_temp.dtypes.items()},
-                "row_count": len(df_temp),
-                "table_name": "excel_only_mode"
-            }
-            return table_info, False
-        
-        # Crear tabla en PostgreSQL (solo si está activado)
-        success, column_mapping = create_dataset_table_from_df(df_temp, connection)
-        if not success:
-            print("❌ No se pudo crear la tabla")
-            return None, False
-        
-        # Insertar datos
-        insert_success = insert_dataframe_to_table(df_temp, column_mapping, connection)
-        if not insert_success:
-            print("❌ No se pudieron insertar los datos")
-            return None, False
-        
-        # Obtener información final de la tabla
-        table_info = get_dataset_table_info(connection)
-        if table_info:
-            print("✅ Dataset cargado exitosamente en PostgreSQL")
-            return table_info, False  # False indica que se cargó desde Excel
-        else:
-            print("⚠️ Tabla creada pero error obteniendo información")
-            return None, False
-            
-    except Exception as e:
-        print(f"❌ Error procesando Excel: {e}")
-        return None, False
-
-def generate_semantic_description_with_llm(df: pd.DataFrame, table_name: str, excel_path: str) -> str:
+def generate_semantic_description_with_llm(df: pd.DataFrame, table_name: str, filename: str = None) -> str:
     """
     Genera una descripción semántica del dataset usando LLM.
-    Analiza estructura, contenido y propósito del dataset.
+    MODIFICADO: Ya no requiere ruta de archivo, usa filename opcional.
     """
     from nodes import llm
 
@@ -482,11 +374,13 @@ def generate_semantic_description_with_llm(df: pd.DataFrame, table_name: str, ex
         if len(numeric_cols) > 0:
             numeric_stats = df[numeric_cols].describe().to_string()
         
+        filename_str = f"- Nombre de archivo: {filename}" if filename else ""
+        
         prompt = f"""
 Analiza este dataset y genera una descripción semántica clara y concisa.
 
 INFORMACIÓN DEL DATASET:
-- Nombre de archivo: {os.path.basename(excel_path)}
+{filename_str}
 - Nombre de tabla: {table_name}
 - Cantidad de filas: {row_count}
 - Columnas ({len(df.columns)}): {columns_info}
@@ -521,99 +415,6 @@ Responde SOLO con la descripción, sin formato adicional.
         print(f"⚠️ Error generando descripción semántica: {e}")
         # Fallback a descripción básica
         return f"Dataset con {len(df.columns)} columnas y {len(df)} filas. Columnas principales: {', '.join(df.columns.tolist()[:5])}"
-
-def initialize_dataset_on_startup():
-    """
-    Inicializa todos los datasets en BD SOLO si ENABLE_AUTO_SAVE_TO_DB es True.
-    Se ejecuta automáticamente al iniciar el programa.
-    MODIFICADO: Ahora genera descripciones semánticas automáticamente.
-    """
-    global ENABLE_AUTO_SAVE_TO_DB
-    
-    if not ENABLE_AUTO_SAVE_TO_DB:
-        print("💾 Guardado automático desactivado - No se crearán tablas al inicio")
-        return True
-    
-    print("💾 Guardado automático activado - Verificando/creando tablas de datasets...")
-    
-    # Crear conexión para verificar/crear tablas
-    dataset_connection = None
-    if dataset_connection is None:
-        try:
-            db_config = load_db_config()
-            connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
-            dataset_connection = psycopg.connect(connection_string)
-            print("🔗 Conexión creada para inicialización de datasets")
-        except Exception as e:
-            print(f"❌ Error creando conexión para datasets: {e}")
-            return False
-    
-    success_count = 0
-    total_files = len(DATASETS_TO_PROCESS)
-    
-    try:
-        for dataset_config in DATASETS_TO_PROCESS:
-            excel_path = dataset_config['excel_path']
-            table_name = dataset_config['table_name']
-            table_schema = dataset_config['table_schema']
-            
-            print(f"\n🔍 Procesando: {os.path.basename(excel_path)} → {table_name}")
-            
-            # Verificar si la tabla ya existe
-            if check_dataset_table_exists(dataset_connection, table_name, table_schema):
-                print(f"✅ Tabla '{table_name}' ya existe en BD")
-                success_count += 1
-                continue
-            
-            # Verificar que el archivo existe
-            if not os.path.exists(excel_path):
-                print(f"❌ Archivo Excel no encontrado: {excel_path}")
-                continue
-            
-            print(f"📂 Cargando Excel para crear tabla en BD...")
-            df_temp = pd.read_excel(excel_path)
-            
-            # 🧠 NUEVO: Generar descripción semántica con LLM
-            print(f"🤖 Generando descripción semántica con LLM...")
-            semantic_description = generate_semantic_description_with_llm(df_temp, table_name, excel_path)
-            
-            # Crear tabla con descripción semántica
-            success, column_mapping = create_dataset_table_from_df(
-                df_temp, 
-                dataset_connection, 
-                table_name, 
-                table_schema,
-                semantic_description=semantic_description
-            )
-            if not success:
-                print(f"❌ No se pudo crear la tabla {table_name}")
-                continue
-            
-            # Insertar datos (incluyendo descripción en la primera fila si es necesario)
-            insert_success = insert_dataframe_to_table(
-                df_temp, 
-                column_mapping, 
-                dataset_connection, 
-                table_name, 
-                table_schema,
-                semantic_description=semantic_description
-            )
-            if insert_success:
-                print(f"✅ Dataset '{table_name}' inicializado correctamente en BD")
-                success_count += 1
-            else:
-                print(f"❌ Error insertando datos en {table_name}")
-        
-        print(f"\n📋 Resumen: {success_count}/{total_files} datasets inicializados correctamente")
-        return success_count > 0
-            
-    except Exception as e:
-        print(f"❌ Error en inicialización de datasets: {e}")
-        return False
-    finally:
-        # Cerrar conexión temporal si se creó
-        if dataset_connection:
-            dataset_connection.close()
 
 def ensure_dataset_loaded(state=None):
     """
@@ -727,60 +528,3 @@ def ensure_dataset_loaded(state=None):
     finally:
         if dataset_connection:
             dataset_connection.close()
-
-def load_specific_dataset(table_name: str, connection=None):
-    """
-    Carga un dataset específico en memoria.
-    Retorna (df, dataset_info, success)
-    """
-    global df, dataset_info, dataset_loaded
-    
-    # Buscar configuración del dataset
-    dataset_config = None
-    for config in DATASETS_TO_PROCESS:
-        if config["table_name"] == table_name:
-            dataset_config = config
-            break
-    
-    if not dataset_config:
-        print(f"❌ Configuración no encontrada para dataset: {table_name}")
-        return None, None, False
-    
-    conn = connection
-    
-    # Intentar cargar desde BD primero
-    if check_dataset_table_exists(conn, table_name, dataset_config["table_schema"]):
-        print(f"🔄 Cargando {table_name} desde PostgreSQL...")
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute(f"SELECT * FROM {dataset_config['table_schema']}.{table_name}")
-                rows = cursor.fetchall()
-                columns = [desc[0] for desc in cursor.description]
-                df = pd.DataFrame(rows, columns=columns)
-                
-                dataset_info = get_dataset_table_info_by_name(table_name, conn)
-                dataset_loaded = True
-                print(f"✅ Dataset {table_name} cargado desde BD: {df.shape}")
-                return df, dataset_info, True
-        except Exception as e:
-            print(f"❌ Error cargando desde BD: {e}")
-    
-    # Fallback: cargar desde Excel
-    if os.path.exists(dataset_config["excel_path"]):
-        print(f"📂 Cargando {table_name} desde Excel...")
-        try:
-            df = pd.read_excel(dataset_config["excel_path"])
-            dataset_info = {
-                "columns": list(df.columns),
-                "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
-                "row_count": len(df),
-                "table_name": table_name
-            }
-            dataset_loaded = True
-            print(f"✅ Dataset {table_name} cargado desde Excel: {df.shape}")
-            return df, dataset_info, True
-        except Exception as e:
-            print(f"❌ Error cargando desde Excel: {e}")
-    
-    print(f"❌ No se pudo cargar dataset: {table_name}")
-    return None, None, False

@@ -26,9 +26,9 @@ def main():
     # Configurar sistema de conexión de datos
     setup_data_connection()
 
-    print("🔄 Inicializando sistema de dataset...")
-    if not initialize_dataset_on_startup():
-        print("⚠️ Advertencia: Error en inicialización del dataset, continuando con funcionalidad limitada")
+    # print("🔄 Inicializando sistema de dataset...")
+    # if not initialize_dataset_on_startup():
+    #     print("⚠️ Advertencia: Error en inicialización del dataset, continuando con funcionalidad limitada")
     
     # configurar PostgresSaver (después de que existe la BD)
     postgres_saver = setup_postgres_saver()
