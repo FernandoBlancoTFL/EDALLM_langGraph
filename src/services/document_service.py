@@ -145,14 +145,14 @@ class DocumentService:
     async def upload_document(self, file_content: bytes, filename: str) -> dict:
         """
         Procesa y almacena un documento en la BD.
-        MODIFICADO: Ahora verifica duplicados por hash antes de cargar.
+        MODIFICADO: Elimina archivo temporal después de procesarlo.
         """
         # Validar archivo
         is_valid, error = self._validate_file(filename)
         if not is_valid:
             raise ValueError(error)
         
-        # 🔐 NUEVO: Calcular hash del archivo
+        # Calcular hash del archivo
         file_hash = calculate_file_hash(file_content, algorithm='sha256')
         file_size = len(file_content)
         
@@ -168,8 +168,10 @@ class DocumentService:
         else:
             should_close = False
         
+        temp_filepath = None  # NUEVO: Para rastrear el archivo temporal
+        
         try:
-            # 🔍 NUEVO: Verificar si ya existe un archivo con el mismo hash
+            # Verificar si ya existe un archivo con el mismo hash
             duplicate = self._check_duplicate_by_hash(file_hash, conn)
             
             if duplicate:
@@ -195,10 +197,12 @@ class DocumentService:
             # Generar nombre de tabla
             table_name = self._generate_table_name(filename, file_id)
             
-            # Guardar archivo temporalmente
+            # MODIFICADO: Guardar archivo temporal solo para lectura
             temp_filepath = os.path.join(self.uploads_dir, f"{file_id}_{filename}")
             with open(temp_filepath, 'wb') as f:
                 f.write(file_content)
+            
+            print(f"📁 Archivo temporal creado: {temp_filepath}")
             
             try:
                 # Leer archivo según extensión
@@ -246,7 +250,7 @@ class DocumentService:
                 if not insert_success:
                     raise Exception("Error al insertar datos en la tabla")
                 
-                # 📝 NUEVO: Registrar documento en document_registry
+                # Registrar documento en document_registry
                 self._register_document(
                     file_id, 
                     file_hash, 
@@ -269,13 +273,18 @@ class DocumentService:
                     "columns": len(df.columns),
                     "semantic_description": semantic_description,
                     "is_duplicate": False,
-                    "file_hash": file_hash[:16] + "..."  # Mostrar solo primeros 16 chars
+                    "file_hash": file_hash[:16] + "..."
                 }
                 
             finally:
-                # Mantener archivo para respaldo
-                pass
-                
+                # NUEVO: Eliminar archivo temporal después de procesarlo
+                if temp_filepath and os.path.exists(temp_filepath):
+                    try:
+                        os.remove(temp_filepath)
+                        print(f"🗑️ Archivo temporal eliminado: {temp_filepath}")
+                    except Exception as e:
+                        print(f"⚠️ No se pudo eliminar archivo temporal: {e}")
+                    
         finally:
             if should_close:
                 conn.close()
