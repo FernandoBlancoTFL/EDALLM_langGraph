@@ -29,11 +29,17 @@ def build_code_prompt(query: str, execution_history: List[dict] = None, df_info:
         1. Usa EXCLUSIVAMENTE el DataFrame 'df' que ya está cargado
         2. NO crees ni simules nuevos DataFrames ni datos de ejemplo
         3. Para gráficos:
-           - Usa nombres descriptivos para los archivos
-           - NO incluyas timestamp en el nombre (se agrega automáticamente)
-           - Guarda en './src/outputs/' con nombre simple como: 'histogram_edad.png'
-           - Usa plt.savefig() primero y luego plt.show()
-           - Ejemplo: plt.savefig('./src/outputs/histogram_edad.png', dpi=300, bbox_inches='tight')
+           - NUNCA uses plt.show() - está PROHIBIDO
+           - SIEMPRE guarda con plt.savefig() en './src/outputs/'
+           - Usa nombres descriptivos sin timestamp: 'histogram_edad.png', 'scatter_ventas.png', etc.
+           - Después de guardar, usa plt.close() para liberar memoria
+           - SIEMPRE retorna la ruta del archivo guardado como última línea
+           - Ejemplo correcto:
+             plt.figure(figsize=(10,6))
+             df['edad'].hist()
+             plt.savefig('./src/outputs/histogram_edad.png', dpi=300, bbox_inches='tight')
+             plt.close()
+             './src/outputs/histogram_edad.png'
         4. Si trabajas con columnas de tiempo, verifica su tipo primero
         5. NO generes comentarios, Type hints o anotaciones en el código. Responde SOLO con código Python ejecutable, sin explicaciones ni markdown
 
@@ -59,17 +65,23 @@ def build_code_prompt(query: str, execution_history: List[dict] = None, df_info:
         3. NO incluyas comentarios sobre cargar datos
         4. El DataFrame 'df' YA ESTÁ DISPONIBLE
         5. Todos los módulos (pd, plt, sns, os) YA ESTÁN IMPORTADOS
+        6. PROHIBIDO usar plt.show() - solo plt.savefig() + plt.close()
 
         CÓDIGO DEBE SER EJECUTABLE DIRECTAMENTE, ejemplo:
-        ✅ CORRECTO:
+        ✅ CORRECTO (para gráficos):
         plt.figure(figsize=(10,6))
         df['columna'].hist()
-        plt.show()
+        plt.savefig('./src/outputs/histogram.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        './src/outputs/histogram.png'
+
+        ✅ CORRECTO (para análisis sin gráfico):
+        df['columna'].describe()
 
         ❌ INCORRECTO:
-        def plot_histogram(df):
-            plt.hist(df['columna'])
-        plot_histogram(df)
+        plt.figure(figsize=(10,6))
+        df['columna'].hist()
+        plt.show()  # ❌ PROHIBIDO
     """
     
     return base_prompt

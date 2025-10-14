@@ -72,6 +72,33 @@ def auto_rename_plot_files(result: Any) -> Any:
     except Exception as e:
         print(f"⚠️ Error al renombrar archivos: {e}")
         return result
+    
+def sanitize_plot_code(code: str) -> str:
+    """
+    Elimina plt.show() y agrega guardado automático de gráficos.
+    """
+    from datetime import datetime
+    
+    # Eliminar plt.show()
+    code = re.sub(r'plt\.show\(\s*\)', '', code)
+    
+    # Si el código contiene plt.plot, plt.bar, df.plot, etc. y NO tiene plt.savefig
+    has_plotting = any(pattern in code for pattern in ['plt.', 'df.plot', 'sns.'])
+    has_savefig = 'plt.savefig' in code
+    
+    if has_plotting and not has_savefig:
+        # Agregar guardado automático al final
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        save_code = f"""
+# Auto-guardado de gráfico
+output_path = "src/outputs/grafico_{timestamp}.png"
+plt.savefig(output_path, bbox_inches='tight', dpi=100)
+plt.close()
+output_path
+"""
+        code = code + "\n" + save_code
+    
+    return code
 
 def run_python_with_df(code: str, error_context: Optional[str] = None):
     """
@@ -86,6 +113,8 @@ def run_python_with_df(code: str, error_context: Optional[str] = None):
             "error": "No hay dataset cargado en memoria",
             "error_type": "dataset_not_loaded"
         }
+    
+    code = sanitize_plot_code(code)
 
     # NO recargar dataset aquí - debe estar ya cargado por node_ejecutar_python
     # Solo verificar que existe
