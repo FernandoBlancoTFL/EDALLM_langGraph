@@ -168,6 +168,7 @@ def nodo_estrategia_datos(state: AgentState):
         - Filtros básicos
         - Agregaciones simples
         - Consultas similares a las exitosas anteriormente
+        - Siempre intenta ejecutar SQL antes que DATAFRAME si consideras que puede ser resuelto con SQL
 
         CRITERIOS PARA DATAFRAME:
         - Análisis estadísticos complejos
@@ -607,7 +608,6 @@ def node_responder(state: AgentState):
                     1. Qué tipo de visualización se generó
                     2. Qué información muestra al usuario
                     3. Insights breves sobre los datos visualizados (si es posible inferirlos)
-                    4. Confirmar dónde se guardó el archivo
 
                     NO incluyas código Python, explicaciones técnicas ni instrucciones.
                 """
