@@ -25,9 +25,13 @@ class DocumentService:
         os.makedirs(self.uploads_dir, exist_ok=True)
 
     def _check_duplicate_by_hash(self, file_hash: str, conn) -> Optional[dict]:
+        """
+        Verifica si ya existe un documento con el mismo hash.
+        MEJORADO: También verifica que la tabla realmente exista en la BD.
+        """
         try:
             with conn.cursor() as cursor:
-                # Primero verificar que la tabla existe
+                # Verificar que la tabla document_registry existe
                 cursor.execute("""
                     SELECT EXISTS (
                         SELECT FROM information_schema.tables 
@@ -45,6 +49,7 @@ class DocumentService:
                         return None
                     print("✅ Tabla document_registry creada")
                 
+                # Buscar registro por hash
                 cursor.execute("""
                     SELECT file_id, original_filename, table_name, 
                         row_count, column_count, upload_date
@@ -55,6 +60,33 @@ class DocumentService:
                 result = cursor.fetchone()
                 
                 if result:
+                    table_name = result[2]
+                    
+                    # NUEVO: Verificar que la tabla realmente existe
+                    cursor.execute("""
+                        SELECT EXISTS (
+                            SELECT FROM information_schema.tables 
+                            WHERE table_schema = 'public' 
+                            AND table_name = %s
+                        )
+                    """, (table_name,))
+                    actual_table_exists = cursor.fetchone()[0]
+                    
+                    if not actual_table_exists:
+                        # La tabla no existe, limpiar registro huérfano
+                        print(f"⚠️ Registro huérfano detectado: tabla '{table_name}' no existe")
+                        print(f"🗑️ Limpiando registro huérfano de document_registry...")
+                        
+                        cursor.execute("""
+                            DELETE FROM document_registry 
+                            WHERE file_hash = %s
+                        """, (file_hash,))
+                        conn.commit()
+                        
+                        print(f"✅ Registro huérfano eliminado")
+                        return None  # Permitir que el archivo se suba nuevamente
+                    
+                    # La tabla existe, es un duplicado real
                     return {
                         "file_id": result[0],
                         "original_filename": result[1],
@@ -65,10 +97,10 @@ class DocumentService:
                     }
                 
                 return None
-                
+                    
         except Exception as e:
             print(f"⚠️ Error verificando duplicados: {e}")
-            conn.rollback()  # Importante: hacer rollback si hay error
+            conn.rollback()
             return None
     
     def _register_document(self, file_id: str, file_hash: str, filename: str, 
@@ -359,6 +391,10 @@ class DocumentService:
                 conn.close()
     
     def delete_document(self, file_id: str) -> dict:
+        """
+        Elimina un documento de la BD.
+        MEJORADO: Asegura eliminar tanto la tabla como el registro.
+        """
         conn = data_connection
         if conn is None:
             db_config = load_db_config()
@@ -379,14 +415,25 @@ class DocumentService:
                     break
             
             if not table_to_delete:
-                raise ValueError(f"No se encontró documento con file_id: {file_id}")
+                # Verificar si existe en document_registry aunque no esté la tabla
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        SELECT table_name FROM document_registry WHERE file_id = %s
+                    """, (file_id,))
+                    result = cursor.fetchone()
+                    
+                    if result:
+                        print(f"⚠️ Encontrado registro huérfano para file_id: {file_id}")
+                        table_to_delete = result[0]
+                    else:
+                        raise ValueError(f"No se encontró documento con file_id: {file_id}")
             
-            # Eliminar tabla primero
+            # Eliminar tabla si existe
             with conn.cursor() as cursor:
                 cursor.execute(f"DROP TABLE IF EXISTS public.{table_to_delete} CASCADE")
                 conn.commit()
             
-            print(f"✅ Documento eliminado: {table_to_delete}")
+            print(f"✅ Tabla eliminada: {table_to_delete}")
             
             # Eliminar archivo físico si existe
             for filename in os.listdir(self.uploads_dir):
@@ -398,10 +445,9 @@ class DocumentService:
                     except:
                         pass
             
-            # Eliminar del registro (en una transacción separada)
+            # Eliminar del registro
             try:
                 with conn.cursor() as cursor:
-                    # Verificar que la tabla existe antes de intentar eliminar
                     cursor.execute("""
                         SELECT EXISTS (
                             SELECT FROM information_schema.tables 
@@ -409,16 +455,21 @@ class DocumentService:
                             AND table_name = 'document_registry'
                         )
                     """)
-                    table_exists = cursor.fetchone()[0]
+                    registry_exists = cursor.fetchone()[0]
                     
-                    if table_exists:
+                    if registry_exists:
                         cursor.execute("DELETE FROM document_registry WHERE file_id = %s", (file_id,))
+                        rows_deleted = cursor.rowcount
                         conn.commit()
-                        print(f"📝 Registro eliminado de document_registry")
+                        
+                        if rows_deleted > 0:
+                            print(f"📝 Registro eliminado de document_registry")
+                        else:
+                            print(f"⚠️ No se encontró registro en document_registry para {file_id}")
                     else:
-                        print("⚠️ Tabla document_registry no existe, saltando eliminación del registro")
+                        print("⚠️ Tabla document_registry no existe")
             except Exception as e:
-                print(f"⚠️ Error al eliminar del registro (no crítico): {e}")
+                print(f"⚠️ Error al eliminar del registro: {e}")
                 conn.rollback()
             
             return {

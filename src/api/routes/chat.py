@@ -125,18 +125,16 @@ async def chat_endpoint(request: ChatRequest):
 def determine_response_type(state: dict) -> str:
     """
     Determina el tipo de respuesta basándose en el estado final.
-    Tipos: "text", "plot", "table", "error"
+    MEJORADO: Detecta gráficos por archivos realmente creados, no por código.
     """
     if not state.get("success", False):
         return "error"
     
-    # Verificar si se generó un gráfico
-    if state.get("execution_history"):
-        for record in state["execution_history"]:
-            if record.get("success") and record.get("code"):
-                code = record["code"].lower()
-                if any(keyword in code for keyword in ["plt.", "plot", "hist", "scatter", "savefig"]):
-                    return "plot"
+    # NUEVO: Verificar si realmente se creó un archivo de gráfico
+    plot_file = find_recently_created_plot()
+    if plot_file:
+        print(f"📊 Gráfico detectado: {plot_file}")
+        return "plot"
     
     # Verificar si hay datos tabulares (SQL o DataFrame)
     if state.get("sql_results"):
@@ -147,53 +145,81 @@ def determine_response_type(state: dict) -> str:
     # Por defecto, respuesta de texto
     return "text"
 
+def find_recently_created_plot(time_window_seconds: int = 10) -> str:
+    """
+    Busca archivos PNG creados recientemente en outputs/.
+    
+    Args:
+        time_window_seconds: Ventana de tiempo en segundos para considerar "reciente"
+    
+    Returns:
+        Nombre del archivo si se encontró, None en caso contrario
+    """
+    try:
+        import time
+        outputs_dir = "./src/outputs"
+        
+        if not os.path.exists(outputs_dir):
+            return None
+        
+        current_time = time.time()
+        png_files = [f for f in os.listdir(outputs_dir) if f.endswith('.png')]
+        
+        # Buscar archivos creados en los últimos X segundos
+        for filename in png_files:
+            filepath = os.path.join(outputs_dir, filename)
+            file_mtime = os.path.getmtime(filepath)
+            
+            # Si fue modificado/creado recientemente
+            if current_time - file_mtime <= time_window_seconds:
+                return filename
+        
+        return None
+        
+    except Exception as e:
+        print(f"⚠️ Error buscando archivos recientes: {e}")
+        return None
+
 def extract_response_data(state: dict, response_type: str):
     """
     Extrae datos adicionales según el tipo de respuesta.
-    MODIFICADO: Mejor manejo de búsqueda de archivos de gráficos.
+    MEJORADO: Usa detección por archivo real en lugar de código.
     """
     if response_type == "plot":
-        plot_filename = None
+        # Primero intentar encontrar el archivo más reciente
+        plot_filename = find_recently_created_plot()
         
-        # Método 1: Buscar en execution_history
-        for record in state.get("execution_history", []):
-            if record.get("success"):
-                result_text = record.get("result", "")
-                plot_filename = extract_plot_filename_from_result(result_text)
-                if plot_filename:
-                    print(f"🔍 Archivo encontrado en execution_history: {plot_filename}")
-                    break
-        
-        # Método 2: Buscar en result directo
-        if not plot_filename and state.get("result"):
-            plot_filename = extract_plot_filename_from_result(state["result"])
-            if plot_filename:
-                print(f"🔍 Archivo encontrado en result: {plot_filename}")
-        
-        # Método 3: Buscar en llm_response
-        if not plot_filename and state.get("llm_response"):
-            plot_filename = extract_plot_filename_from_result(state["llm_response"])
-            if plot_filename:
-                print(f"🔍 Archivo encontrado en llm_response: {plot_filename}")
-        
-        # Método 4: Buscar el archivo más reciente en outputs/
+        # Si no se encontró por timestamp, buscar en los resultados
         if not plot_filename:
-            print("⚠️ No se encontró nombre de archivo en resultados, buscando archivo más reciente...")
-            try:
-                outputs_dir = "./src/outputs"
-                if os.path.exists(outputs_dir):
-                    files = [f for f in os.listdir(outputs_dir) if f.endswith('.png')]
-                    if files:
-                        # Ordenar por fecha de modificación (más reciente primero)
-                        files.sort(key=lambda x: os.path.getmtime(os.path.join(outputs_dir, x)), reverse=True)
-                        plot_filename = files[0]
-                        print(f"🔍 Usando archivo más reciente: {plot_filename}")
-            except Exception as e:
-                print(f"❌ Error buscando archivos: {e}")
+            # Método 1: Buscar en execution_history
+            for record in state.get("execution_history", []):
+                if record.get("success"):
+                    result_text = record.get("result", "")
+                    plot_filename = extract_plot_filename_from_result(result_text)
+                    if plot_filename:
+                        print(f"🔍 Archivo encontrado en execution_history: {plot_filename}")
+                        break
+            
+            # Método 2: Buscar en result directo
+            if not plot_filename and state.get("result"):
+                plot_filename = extract_plot_filename_from_result(state["result"])
+                if plot_filename:
+                    print(f"🔍 Archivo encontrado en result: {plot_filename}")
+            
+            # Método 3: Buscar en llm_response
+            if not plot_filename and state.get("llm_response"):
+                plot_filename = extract_plot_filename_from_result(state["llm_response"])
+                if plot_filename:
+                    print(f"🔍 Archivo encontrado en llm_response: {plot_filename}")
         
         if plot_filename:
             # Obtener metadata del archivo
             metadata = get_plot_metadata(plot_filename)
+            
+            # Verificar que el archivo realmente existe
+            if not metadata.get("exists"):
+                print(f"❌ Archivo no existe: {plot_filename}")
+                return {"error": "El archivo del gráfico no existe"}
             
             # Construir URL completa
             base_url = "http://localhost:8000"
@@ -211,7 +237,6 @@ def extract_response_data(state: dict, response_type: str):
         return {"error": "No se pudo encontrar el archivo del gráfico"}
     
     elif response_type == "table":
-        # ... (mantener el código existente para table)
         sql_results = state.get("sql_results")
         if isinstance(sql_results, dict):
             return {
