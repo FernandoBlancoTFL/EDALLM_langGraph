@@ -111,58 +111,6 @@ def list_user_conversations(postgres_saver_instance, user_id: str = None):
         print(f"❌ Error listando conversaciones: {e}")
         return []
 
-# def load_conversation_history(thread_id: str):
-#     """
-#     Recupera el historial de conversaciones desde PostgresSaver para un thread específico.
-#     CORREGIDO: Usa correctamente la API de PostgresSaver
-#     """
-#     postgres_saver = get_postgres_saver()
-    
-#     if not postgres_saver:
-#         print("⚠️ PostgresSaver no disponible para recuperar historial")
-#         return [], {}
-    
-#     try:
-#         config = {"configurable": {"thread_id": thread_id}}
-        
-#         # CORRECCIÓN: Usar get_tuple() en lugar de get()
-#         checkpoint_tuple = postgres_saver.get_tuple(config)
-        
-#         if checkpoint_tuple and checkpoint_tuple.checkpoint:
-#             checkpoint = checkpoint_tuple.checkpoint
-            
-#             # CORRECCIÓN: Los valores del estado están en channel_values
-#             channel_values = checkpoint.get("channel_values") or checkpoint.get("channel_versions", {})
-            
-#             if not channel_values:
-#                 print("📭 No se encontraron valores en el checkpoint")
-#                 print(f"🔍 Claves disponibles: {list(checkpoint.keys())}")
-#                 return [], {}
-            
-#             # Recuperar conversation_history y user_context
-#             conversation_history = channel_values.get("conversation_history", [])
-#             user_context = channel_values.get("user_context", {
-#                 "preferred_analysis_type": None,
-#                 "common_datasets": [],
-#                 "visualization_preferences": [],
-#                 "error_patterns": [],
-#                 "last_interaction": None
-#             })
-            
-#             print(f"📚 Historial recuperado: {len(conversation_history)} conversaciones")
-#             print(f"👤 Contexto: {len(user_context.get('common_datasets', []))} datasets")
-            
-#             return conversation_history, user_context
-#         else:
-#             print("📭 No se encontró checkpoint previo para este thread")
-#             return [], {}
-            
-#     except Exception as e:
-#         print(f"⚠️ Error recuperando historial: {e}")
-#         import traceback
-#         traceback.print_exc()
-#         return [], {}
-
 def load_conversation_history(thread_id: str):
     """
     CORREGIDO: Recupera historial usando list() para obtener todos los checkpoints

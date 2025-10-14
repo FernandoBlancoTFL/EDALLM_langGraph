@@ -131,9 +131,11 @@ def setup_data_connection():
         return False
 
 def get_table_metadata_light(table_name: str):
-    """Obtiene metadatos básicos de una tabla sin cargar datos"""
-    
-    conn = data_connection  # Usar la conexión global de datos
+    """
+    Obtiene metadatos básicos de una tabla sin cargar datos.
+    MEJORADO: Ahora maneja nombres parciales y los mapea al nombre completo.
+    """
+    conn = data_connection
     if conn is None:
         try:
             db_config = load_db_config()
@@ -146,26 +148,59 @@ def get_table_metadata_light(table_name: str):
         temp_connection = False
     
     try:
+        # NUEVO: Intentar encontrar la tabla real si se pasó un nombre parcial
+        actual_table_name = table_name
+        
         with conn.cursor() as cursor:
+            # Verificar si la tabla existe exactamente como se pasó
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name = %s
+                )
+            """, (table_name,))
+            exists = cursor.fetchone()[0]
+            
+            if not exists:
+                # Buscar tabla que empiece con el nombre dado
+                cursor.execute("""
+                    SELECT table_name 
+                    FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name LIKE %s
+                    AND table_name NOT IN ('document_registry', 'checkpoints', 'checkpoint_writes')
+                    LIMIT 1
+                """, (table_name + '%',))
+                
+                result = cursor.fetchone()
+                if result:
+                    actual_table_name = result[0]
+                    print(f"🔄 Mapeado: '{table_name}' → '{actual_table_name}'")
+                else:
+                    print(f"❌ No se encontró tabla que coincida con: '{table_name}'")
+                    return {}
+            
             # Información de columnas
             cursor.execute("""
                 SELECT column_name, data_type, is_nullable
                 FROM information_schema.columns
                 WHERE table_schema = 'public' AND table_name = %s
                 ORDER BY ordinal_position
-            """, (table_name,))
+            """, (actual_table_name,))
             
             columns_info = cursor.fetchall()
             
             # Conteo de filas
-            cursor.execute(f'SELECT COUNT(*) FROM public."{table_name}"')
+            cursor.execute(f'SELECT COUNT(*) FROM public."{actual_table_name}"')
             row_count = cursor.fetchone()[0]
             
             return {
                 "columns": [col[0] for col in columns_info],
                 "dtypes": {col[0]: col[1] for col in columns_info},
                 "row_count": row_count,
-                "nullable": {col[0]: col[2] == 'YES' for col in columns_info}
+                "nullable": {col[0]: col[2] == 'YES' for col in columns_info},
+                "actual_table_name": actual_table_name  # NUEVO: Incluir nombre real
             }
             
     except Exception as e:
@@ -173,4 +208,84 @@ def get_table_metadata_light(table_name: str):
         return {}
     finally:
         if temp_connection and conn:
+            conn.close()
+
+def create_document_registry_table():
+    """
+    Crea una tabla para registrar documentos cargados y sus hashes.
+    Esta tabla actúa como un registro central de todos los documentos.
+    """
+    global data_connection
+    
+    # Usar la conexión global si existe, sino crear una temporal
+    conn = data_connection
+    should_close = False
+    
+    if conn is None:
+        db_config = load_db_config()
+        try:
+            connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+            conn = psycopg.connect(connection_string)
+            should_close = True
+        except Exception as e:
+            print(f"❌ Error conectando a la BD: {e}")
+            return False
+    
+    try:
+        with conn.cursor() as cursor:
+            # Crear tabla de registro de documentos
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS document_registry (
+                    file_id VARCHAR(8) PRIMARY KEY,
+                    file_hash VARCHAR(64) UNIQUE NOT NULL,
+                    original_filename VARCHAR(255) NOT NULL,
+                    table_name VARCHAR(100) NOT NULL,
+                    file_size_bytes BIGINT NOT NULL,
+                    row_count INTEGER NOT NULL,
+                    column_count INTEGER NOT NULL,
+                    upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_accessed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    semantic_description TEXT
+                )
+            """)
+            
+            # Crear índice para búsqueda rápida por hash
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_document_hash 
+                ON document_registry(file_hash)
+            """)
+            
+            # Crear índice para búsqueda por nombre de tabla
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_document_table_name 
+                ON document_registry(table_name)
+            """)
+            
+            conn.commit()
+            print("✅ Tabla document_registry creada/verificada exitosamente")
+            
+            # Verificar que la tabla realmente existe
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name = 'document_registry'
+                )
+            """)
+            exists = cursor.fetchone()[0]
+            
+            if exists:
+                print("✅ Verificación: document_registry existe en la BD")
+                return True
+            else:
+                print("❌ Advertencia: document_registry no se creó correctamente")
+                return False
+                
+    except Exception as e:
+        print(f"❌ Error creando tabla document_registry: {e}")
+        if conn:
+            conn.rollback()
+        return False
+    finally:
+        if should_close and conn:
             conn.close()

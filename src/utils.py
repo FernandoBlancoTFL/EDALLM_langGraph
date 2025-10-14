@@ -1,7 +1,11 @@
+import os
+import re
+import hashlib
 import pandas as pd
 from datetime import datetime
 from dataset_manager import list_stored_tables
 from checkpoints import load_conversation_history
+from datetime import datetime
 
 def clean_data_for_json(data):
     """Función simplificada solo para datasets"""
@@ -92,3 +96,141 @@ def show_conversation_memory(thread_id: str):
         print("🧠 No se encontró memoria previa")
     
     print()
+
+def generate_unique_plot_filename(base_name: str) -> str:
+    """
+    Genera un nombre único para un archivo de gráfico con timestamp.
+    
+    Args:
+        base_name: Nombre base del archivo (ej: "histogram_edad")
+    
+    Returns:
+        Nombre único con timestamp (ej: "histogram_edad_20231008_143022.png")
+    """
+    # Limpiar el nombre base (remover .png si existe)
+    base_name = base_name.replace('.png', '')
+    
+    # Generar timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Construir nombre único
+    unique_name = f"{base_name}_{timestamp}.png"
+    
+    return unique_name
+
+def extract_plot_filename_from_result(result_text: str) -> str:
+    """
+    Extrae el nombre del archivo de gráfico desde el texto de resultado.
+    MEJORADO: Ahora captura más patrones.
+    
+    Args:
+        result_text: Texto que contiene la ruta del archivo guardado
+    
+    Returns:
+        Nombre del archivo (ej: "histogram_edad_20231008_143022.png") o None
+    """
+    if not result_text:
+        return None
+    
+    result_str = str(result_text)
+    
+    # Patrón 1: "outputs/nombre_archivo.png"
+    match = re.search(r'outputs[/\\]([^\s\'"]+\.png)', result_str)
+    if match:
+        return match.group(1)
+    
+    # Patrón 2: "./src/outputs/nombre_archivo.png"
+    match = re.search(r'\.\/src\/outputs[/\\]([^\s\'"]+\.png)', result_str)
+    if match:
+        return match.group(1)
+    
+    # Patrón 3: "src/outputs/nombre_archivo.png"
+    match = re.search(r'src[/\\]outputs[/\\]([^\s\'"]+\.png)', result_str)
+    if match:
+        return match.group(1)
+    
+    # Patrón 4: Solo el nombre del archivo con .png (sin path)
+    # Ejemplo: "histogram_booking_value.png" o "`histogram_booking_value.png`"
+    match = re.search(r'[`\']?([a-zA-Z0-9_\-]+\.png)[`\']?', result_str)
+    if match:
+        filename = match.group(1)
+        # Verificar que el archivo existe en outputs
+        filepath = os.path.join("./src/outputs", filename)
+        if os.path.exists(filepath):
+            return filename
+    
+    # Patrón 5: Buscar cualquier .png mencionado
+    match = re.search(r'([a-zA-Z0-9_\-]+_\d{8}_\d{6}\.png)', result_str)
+    if match:
+        return match.group(1)
+    
+    return None
+
+def get_plot_metadata(filename: str) -> dict:
+    """
+    Obtiene metadata de un archivo de gráfico.
+    
+    Args:
+        filename: Nombre del archivo (ej: "histogram_edad_20231008_143022.png")
+    
+    Returns:
+        Diccionario con metadata del gráfico
+    """
+    filepath = os.path.join("./src/outputs", filename)
+    
+    metadata = {
+        "filename": filename,
+        "exists": os.path.exists(filepath),
+        "created_at": None,
+        "size_bytes": None
+    }
+    
+    if metadata["exists"]:
+        stat = os.stat(filepath)
+        metadata["created_at"] = datetime.fromtimestamp(stat.st_mtime).isoformat()
+        metadata["size_bytes"] = stat.st_size
+    
+    return metadata
+
+def calculate_file_hash(file_content: bytes, algorithm: str = 'sha256') -> str:
+    """
+    Calcula el hash de un archivo basándose en su contenido.
+    
+    Args:
+        file_content: Contenido del archivo en bytes
+        algorithm: Algoritmo de hash ('md5', 'sha1', 'sha256')
+    
+    Returns:
+        String con el hash hexadecimal del archivo
+    
+    Example:
+        >>> content = b"Hello World"
+        >>> calculate_file_hash(content)
+        'a591a6d40bf420404a011733cfb7b190d62c65bf0bcda32b57b277d9ad9f146e'
+    """
+    if algorithm == 'md5':
+        hasher = hashlib.md5()
+    elif algorithm == 'sha1':
+        hasher = hashlib.sha1()
+    elif algorithm == 'sha256':
+        hasher = hashlib.sha256()
+    else:
+        raise ValueError(f"Algoritmo no soportado: {algorithm}")
+    
+    hasher.update(file_content)
+    return hasher.hexdigest()
+
+def verify_file_hash(file_content: bytes, expected_hash: str, algorithm: str = 'sha256') -> bool:
+    """
+    Verifica si el hash de un archivo coincide con un hash esperado.
+    
+    Args:
+        file_content: Contenido del archivo en bytes
+        expected_hash: Hash esperado en formato hexadecimal
+        algorithm: Algoritmo de hash usado
+    
+    Returns:
+        True si el hash coincide, False en caso contrario
+    """
+    calculated_hash = calculate_file_hash(file_content, algorithm)
+    return calculated_hash == expected_hash

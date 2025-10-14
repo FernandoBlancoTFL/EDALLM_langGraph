@@ -24,7 +24,8 @@ llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", google_api_key=API_KEY, t
 
 def nodo_estrategia_datos(state: AgentState):
     """
-    Recupera historial desde PostgresSaver y actualiza contexto
+    Recupera historial desde PostgresSaver y actualiza contexto.
+    MODIFICADO: Detiene ejecución si no encuentra dataset válido.
     """
     print("🧠 Iniciando análisis con recuperación de memoria...")
 
@@ -37,8 +38,6 @@ def nodo_estrategia_datos(state: AgentState):
         state["result"] = general_response
         state["success"] = True
         state["history"].append(f"General → Respuesta instantánea ({general_type})")
-        
-        # No actualizar memoria para consultas triviales
         return state
 
     # Recuperar historial (solo si no es consulta general)
@@ -55,7 +54,7 @@ def nodo_estrategia_datos(state: AgentState):
             "last_interaction": None
         }
     
-    # Generar resumen de conversaciones previas para contexto
+    # Generar resumen de conversaciones previas
     if state["conversation_history"]:
         memory_summary = generate_memory_summary(state["conversation_history"])
         state["memory_summary"] = memory_summary
@@ -72,7 +71,7 @@ def nodo_estrategia_datos(state: AgentState):
     if is_memory_query(state["query"]):
         print("🧠 Consulta sobre memoria detectada - respuesta directa")
         state["data_strategy"] = "memory"
-        state["strategy_reason"] = "Consulta sobre historial de conversaciones - respuesta directa desde memoria cargada"
+        state["strategy_reason"] = "Consulta sobre historial de conversaciones"
         state["result"] = generate_memory_response(state)
         state["success"] = True
         state["history"].append(f"Memoria → Respuesta directa sobre historial")
@@ -80,18 +79,55 @@ def nodo_estrategia_datos(state: AgentState):
     
     print("🔍 Analizando estrategia de acceso a datos...")
     
+    # Obtener datasets disponibles
     if not state.get("available_datasets"):
         state["available_datasets"] = get_all_available_datasets()
     
+    # NUEVO: Validar que haya datasets disponibles
+    if not state["available_datasets"]:
+        print("❌ No hay datasets disponibles en la base de datos")
+        state["data_strategy"] = "no_dataset"
+        state["strategy_reason"] = "No hay datasets en la BD"
+        state["result"] = (
+            "❌ Lo siento, actualmente no hay datasets disponibles en la base de datos para responder tu consulta.\n\n"
+            "💡 Para poder ayudarte, necesito que subas primero un archivo de datos (Excel o CSV) "
+            "usando el endpoint /api/documents/upload.\n\n"
+            "Una vez que hayas subido al menos un dataset, podré analizar tus datos y responder tus preguntas."
+        )
+        state["success"] = False
+        state["history"].append("Estrategia → NO_DATASET (sin datos en BD)")
+        return state
+    
+    # Seleccionar dataset apropiado
     if not state.get("selected_dataset"):
         selected_dataset = identify_dataset_from_query_with_memory(
             state["query"], 
             state["available_datasets"],
             state["user_context"]
         )
-        if selected_dataset:
-            state["selected_dataset"] = selected_dataset
-            state["dataset_context"] = state["available_datasets"][selected_dataset]
+        
+        # NUEVO: Validar que se seleccionó un dataset válido
+        if selected_dataset is None:
+            print("❌ No se pudo identificar un dataset apropiado para la consulta")
+            state["data_strategy"] = "no_match"
+            state["strategy_reason"] = "Ningún dataset coincide con la consulta"
+            
+            # Construir lista de datasets disponibles
+            available_list = "\n".join([f"  • {name}" for name in state["available_datasets"].keys()])
+            
+            state["result"] = (
+                f"❌ No pude encontrar un dataset apropiado para tu consulta: '{state['query']}'\n\n"
+                f"📊 Datasets disponibles actualmente:\n{available_list}\n\n"
+                "💡 Intenta reformular tu pregunta mencionando uno de estos datasets, "
+                "o sube un nuevo archivo que contenga los datos que necesitas."
+            )
+            state["success"] = False
+            state["history"].append("Estrategia → NO_MATCH (dataset no encontrado)")
+            return state
+        
+        state["selected_dataset"] = selected_dataset
+        state["dataset_context"] = state["available_datasets"][selected_dataset]
+        print(f"✅ Dataset seleccionado: {selected_dataset}")
     
     # Obtener metadatos y analizar estrategia
     table_metadata = get_table_metadata_light(state["selected_dataset"])
@@ -104,9 +140,8 @@ def nodo_estrategia_datos(state: AgentState):
         print(f"🔍 Razón: {viz_reason}")
         state["data_strategy"] = "dataframe"
         state["sql_feasible"] = False
-        state["strategy_reason"] = f"Estrategia DATAFRAME forzada automáticamente: {viz_reason}"
+        state["strategy_reason"] = f"Estrategia DATAFRAME forzada: {viz_reason}"
         state["history"].append(f"Estrategia → DATAFRAME (auto-detección: {viz_reason})")
-        
         return state
     
     # DETECCIÓN 3: Análisis normal - usar LLM
@@ -133,6 +168,7 @@ def nodo_estrategia_datos(state: AgentState):
         - Filtros básicos
         - Agregaciones simples
         - Consultas similares a las exitosas anteriormente
+        - Siempre intenta ejecutar SQL antes que DATAFRAME si consideras que puede ser resuelto con SQL
 
         CRITERIOS PARA DATAFRAME:
         - Análisis estadísticos complejos
@@ -258,6 +294,16 @@ def nodo_sql_executor(state: AgentState):
     """NUEVO: Ejecuta consultas SQL directamente en la base de datos"""
     
     print("🗃️ Ejecutando consulta SQL...")
+
+    # Obtener metadatos y nombre real de tabla
+    table_metadata = get_table_metadata_light(state['selected_dataset'])
+    
+    # NUEVO: Usar el nombre real de la tabla si está disponible
+    actual_table_name = table_metadata.get('actual_table_name', state['selected_dataset'])
+    
+    if actual_table_name != state['selected_dataset']:
+        print(f"🔄 Usando tabla real: {actual_table_name}")
+        state['selected_dataset'] = actual_table_name
     
     # Obtener conexión
     conn = data_connection  # Usar la conexión global de datos
@@ -507,6 +553,8 @@ def node_responder(state: AgentState):
             # Ya tiene respuesta generada, solo mostrarla
             respuesta = state["result"]
             print(f"\n🤖 Respuesta Final:\n{respuesta}")
+            # NUEVO: Guardar respuesta LLM
+            state["llm_response"] = respuesta
             
             # Para consultas de memoria, SÍ guardar (son consultas relevantes)
             if data_strategy == "memory":
@@ -560,7 +608,6 @@ def node_responder(state: AgentState):
                     1. Qué tipo de visualización se generó
                     2. Qué información muestra al usuario
                     3. Insights breves sobre los datos visualizados (si es posible inferirlos)
-                    4. Confirmar dónde se guardó el archivo
 
                     NO incluyas código Python, explicaciones técnicas ni instrucciones.
                 """
@@ -624,6 +671,9 @@ def node_responder(state: AgentState):
             
             respuesta = llm.invoke(prompt).content
             print(f"\n🤖 Respuesta Final:\n{respuesta}")
+
+            # NUEVO: Guardar respuesta LLM
+            state["llm_response"] = respuesta
     
     else:
         # Manejo de errores
@@ -645,6 +695,9 @@ def node_responder(state: AgentState):
         
         respuesta = llm.invoke(prompt).content
         print(f"\n🤖 Respuesta Final:\n{respuesta}")
+
+        # NUEVO: Guardar la respuesta del LLM en el estado
+        state["llm_response"] = respuesta
     
     # ACTUALIZAR MEMORIA solo para consultas relevantes
     if not skip_memory:
