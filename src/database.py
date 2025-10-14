@@ -112,6 +112,7 @@ def test_target_database_connection():
 def setup_data_connection():
     """
     Configura una conexión independiente para operaciones de datos.
+    MODIFICADO: Usa autocommit para evitar transacciones colgadas.
     """
     global data_connection
     
@@ -121,8 +122,9 @@ def setup_data_connection():
         db_config = load_db_config()
         connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
         
-        data_connection = psycopg.connect(connection_string)
-        print("✅ Conexión de datos configurada exitosamente")
+        # 🔧 CRÍTICO: Usar autocommit para evitar transacciones abiertas
+        data_connection = psycopg.connect(connection_string, autocommit=True)
+        print("✅ Conexión de datos configurada con autocommit")
         return True
         
     except Exception as e:

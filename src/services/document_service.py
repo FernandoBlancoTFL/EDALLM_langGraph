@@ -393,16 +393,19 @@ class DocumentService:
     def delete_document(self, file_id: str) -> dict:
         """
         Elimina un documento de la BD.
-        MEJORADO: Asegura eliminar tanto la tabla como el registro.
+        MEJORADO: Usa conexión independiente para evitar bloqueos.
         """
-        conn = data_connection
-        if conn is None:
-            db_config = load_db_config()
-            connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
-            conn = psycopg.connect(connection_string)
-            should_close = True
-        else:
-            should_close = False
+        # 🔧 SOLUCIÓN 4: SIEMPRE crear una conexión nueva e independiente
+        # Esto evita conflictos con la conexión global usada por el chat
+        db_config = load_db_config()
+        connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+        
+        try:
+            conn = psycopg.connect(connection_string, autocommit=True)
+            print("🔗 Conexión independiente creada para eliminación")
+        except Exception as e:
+            print(f"❌ Error creando conexión: {e}")
+            raise ValueError(f"No se pudo conectar a la base de datos: {e}")
         
         try:
             # Buscar tabla que contenga el file_id
@@ -478,5 +481,9 @@ class DocumentService:
             }
         
         finally:
-            if should_close:
+            # 🔧 SOLUCIÓN 4: SIEMPRE cerrar la conexión independiente
+            try:
                 conn.close()
+                print("✅ Conexión independiente cerrada")
+            except:
+                pass

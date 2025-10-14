@@ -397,6 +397,15 @@ def nodo_sql_executor(state: AgentState):
             state["success"] = True
             print(f"✅ SQL ejecutado exitosamente")
 
+            # 🔧 SOLUCIÓN 1: Commit explícito para liberar la conexión
+            if not temp_connection:
+                # Solo hacer commit si es la conexión global compartida
+                try:
+                    conn.commit()
+                    print("✅ Transacción confirmada (commit)")
+                except Exception as commit_error:
+                    print(f"⚠️ Error en commit: {commit_error}")
+
             # Mostrar resultados en consola
             if has_results:  # Si hay resultados
                 if rows:
