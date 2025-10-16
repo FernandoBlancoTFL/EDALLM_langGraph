@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from datetime import datetime
+from state import AgentState
 from utils import extract_plot_filename_from_result, get_plot_metadata
 import sys
 import os
@@ -12,6 +13,14 @@ from config import SINGLE_USER_THREAD_ID, SINGLE_USER_ID
 from graph import create_graph_with_sql
 from checkpoints import get_postgres_saver
 from utils import clean_state_for_serialization
+
+from src.services.chat_service import (
+    get_conversation_history
+)
+from src.api.schemas.chat import (
+    ChatHistoryResponse,
+    ChatHistoryItem
+)
 
 router = APIRouter()
 
@@ -82,17 +91,7 @@ async def chat_endpoint(request: ChatRequest):
         # Invocar el grafo (ejecuta todo el flujo de análisis)
         final_state = graph.invoke(initial_state, config=config)
 
-        # DEBUG: Imprimir información relevante sobre el archivo
-        # print("\n🔍 DEBUG - Buscando archivo de gráfico:")
-        # print(f"   Result: {final_state.get('result', 'N/A')[:200]}")
-        # print(f"   LLM Response: {final_state.get('llm_response', 'N/A')[:200]}")
-        # if final_state.get("execution_history"):
-        #     for i, record in enumerate(final_state["execution_history"]):
-        #         if record.get("success"):
-        #             print(f"   Execution {i} result: {str(record.get('result', 'N/A'))[:200]}")
-        # print()
-        
-        # Limpiar estado para serialización
+        # Limpiar estado para serialización (asegurarse de NO eliminar response_metadata)
         final_state = clean_state_for_serialization(final_state)
         
         # Determinar tipo de respuesta
@@ -180,6 +179,63 @@ def find_recently_created_plot(time_window_seconds: int = 10) -> str:
         print(f"⚠️ Error buscando archivos recientes: {e}")
         return None
 
+def prepare_response_metadata(state: AgentState) -> dict:
+    """
+    Prepara metadata completa de la respuesta para guardar en checkpoint.
+    Detecta tipo de respuesta y extrae datos relevantes.
+    """
+    metadata = {
+        "timestamp": datetime.now().isoformat(),
+        "query": state.get("query"),
+        "success": state.get("success", False),
+        "strategy_used": state.get("data_strategy", "unknown"),
+        "iterations": state.get("iteration_count", 0)
+    }
+    
+    # Detectar tipo de respuesta
+    if state.get("success", False):
+        # Buscar si hay gráfico
+        plot_file = find_recently_created_plot()
+        
+        if plot_file:
+            plot_metadata = get_plot_metadata(plot_file)
+            base_url = "http://localhost:8000"
+            
+            metadata["type"] = "plot"
+            metadata["data"] = {
+                "url": f"{base_url}/outputs/{plot_file}",
+                "filename": plot_file,
+                "created_at": plot_metadata.get("created_at"),
+                "size_bytes": plot_metadata.get("size_bytes"),
+                "exists": plot_metadata.get("exists")
+            }
+        
+        # Verificar si hay resultados SQL
+        elif state.get("sql_results"):
+            sql_results = state["sql_results"]
+            if isinstance(sql_results, dict) and sql_results.get("data"):
+                metadata["type"] = "table"
+                metadata["data"] = {
+                    "rows": sql_results.get("data", [])[:50],
+                    "columns": sql_results.get("columns", []),
+                    "total_rows": len(sql_results.get("data", []))
+                }
+        
+        # Respuesta de texto
+        else:
+            metadata["type"] = "text"
+            metadata["data"] = None
+    
+    else:
+        # Error
+        metadata["type"] = "error"
+        metadata["data"] = {
+            "error_message": state.get("final_error", "Error desconocido"),
+            "attempts": state.get("iteration_count", 0)
+        }
+    
+    return metadata
+
 def extract_response_data(state: dict, response_type: str):
     """
     Extrae datos adicionales según el tipo de respuesta.
@@ -262,3 +318,50 @@ def extract_sql_query(state: dict) -> str:
         if record.get("code") and "SELECT" in record["code"].upper():
             return record["code"]
     return None
+
+# ============================================================================
+# Endpoints de historial de conversaciones
+# ============================================================================
+
+@router.get("/chat-history", response_model=ChatHistoryResponse)
+async def get_chat_history(
+    limit: int = 30,
+    thread_id: str = SINGLE_USER_THREAD_ID,
+    include_incomplete: bool = False
+):
+    """
+    Obtiene el historial de conversaciones del usuario.
+    
+    - **limit**: Número máximo de conversaciones a retornar (default: 20)
+    - **thread_id**: ID del thread (default: thread único del sistema)
+    - **include_incomplete**: Incluir conversaciones incompletas (default: False)
+    
+    Retorna las conversaciones ordenadas de más reciente a más antigua,
+    incluyendo solo aquellas que tienen respuesta completa del LLM.
+    """
+    try:
+        conversations = get_conversation_history(
+            thread_id=thread_id,
+            limit=limit,
+            include_incomplete=include_incomplete
+        )
+        
+        # Convertir a objetos ChatHistoryItem
+        conversation_items = [
+            ChatHistoryItem(**conv) for conv in conversations
+        ]
+        
+        return ChatHistoryResponse(
+            thread_id=thread_id,
+            total=len(conversation_items),
+            conversations=conversation_items
+        )
+    
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": str(e),
+                "message": "Error obteniendo historial de conversaciones"
+            }
+        )
