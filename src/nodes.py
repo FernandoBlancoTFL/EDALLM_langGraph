@@ -550,6 +550,8 @@ def node_responder(state: AgentState):
     """
     Genera respuestas interpretativas con datos específicos obtenidos
     """
+    from api.routes.chat import prepare_response_metadata
+
     success = state.get("success", False)
     data_strategy = state.get("data_strategy", "dataframe")
     
@@ -564,6 +566,10 @@ def node_responder(state: AgentState):
             print(f"\n🤖 Respuesta Final:\n{respuesta}")
             # NUEVO: Guardar respuesta LLM
             state["llm_response"] = respuesta
+
+            # NUEVO: Preparar metadata de respuesta para checkpoint
+            state["response_metadata"] = prepare_response_metadata(state)
+            print(f"💾 Metadata guardada en checkpoint: {state['response_metadata']['type']}")
             
             # Para consultas de memoria, SÍ guardar (son consultas relevantes)
             if data_strategy == "memory":
@@ -683,6 +689,10 @@ def node_responder(state: AgentState):
 
             # NUEVO: Guardar respuesta LLM
             state["llm_response"] = respuesta
+
+            # NUEVO: Preparar metadata de respuesta para checkpoint
+            state["response_metadata"] = prepare_response_metadata(state)
+            print(f"💾 Metadata guardada en checkpoint: {state['response_metadata']['type']}")
     
     else:
         # Manejo de errores
@@ -707,6 +717,10 @@ def node_responder(state: AgentState):
 
         # NUEVO: Guardar la respuesta del LLM en el estado
         state["llm_response"] = respuesta
+
+        # NUEVO: Preparar metadata de respuesta para checkpoint
+        state["response_metadata"] = prepare_response_metadata(state)
+        print(f"💾 Metadata de error guardada en checkpoint")
     
     # ACTUALIZAR MEMORIA solo para consultas relevantes
     if not skip_memory:
@@ -739,5 +753,5 @@ def node_responder(state: AgentState):
     else:
         print("ℹ️ Consulta general - no se guarda en memoria conversacional")
         state["history"].append(f"Responder → Consulta general - sin actualización de memoria")
-    
+
     return state

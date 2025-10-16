@@ -4,8 +4,9 @@ import hashlib
 import pandas as pd
 from datetime import datetime
 from dataset_manager import list_stored_tables
-from checkpoints import load_conversation_history
+from checkpoints import get_postgres_saver, load_conversation_history
 from datetime import datetime
+from config import SINGLE_USER_THREAD_ID
 
 def clean_data_for_json(data):
     """Función simplificada solo para datasets"""

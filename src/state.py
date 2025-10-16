@@ -31,3 +31,4 @@ class AgentState(TypedDict):
     learned_patterns: List[str]
     session_metadata: dict
     llm_response: Optional[str]
+    response_metadata: Optional[dict]

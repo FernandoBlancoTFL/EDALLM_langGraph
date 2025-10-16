@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional, Any
+from typing import Optional, Any, List
 
 class ChatRequest(BaseModel):
     """Esquema para la petición del endpoint /chat"""
@@ -8,7 +8,7 @@ class ChatRequest(BaseModel):
     class Config:
         json_schema_extra = {
             "example": {
-                "message": "Muéstrame un gráfico con las ventas por mes"
+                "message": " ¿Cuántas filas tiene el dataset de cocodrilos?"
             }
         }
 
@@ -38,5 +38,62 @@ class ChatResponse(BaseModel):
                 "success": True,
                 "iterations": 1,
                 "strategy_used": "dataframe"
+            }
+        }
+
+# ============================================================================
+# Esquemas para historial de conversaciones
+# ============================================================================
+
+class ChatHistoryItem(BaseModel):
+    """Representa una conversación individual en el historial"""
+    checkpoint_id: str
+    timestamp: str
+    query: str
+    llm_response: Optional[str] = None
+    success: bool
+    response_metadata: Optional[dict] = None
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "checkpoint_id": "1f0aa458-40ec-6df3-8004-10848f5d6422",
+                "timestamp": "2025-10-16T04:06:39.351300+00:00",
+                "query": "genera un histograma de la columna edad",
+                "llm_response": "Se generó un histograma que muestra...",
+                "success": True,
+                "response_metadata": {
+                    "type": "plot",
+                    "data": {
+                        "url": "http://localhost:8000/outputs/histogram_edad.png",
+                        "filename": "histogram_edad.png",
+                        "exists": True
+                    }
+                }
+            }
+        }
+
+
+class ChatHistoryResponse(BaseModel):
+    """Respuesta del endpoint de historial"""
+    thread_id: str
+    total: int
+    conversations: List[ChatHistoryItem]
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "thread_id": "single_user_persistent_thread",
+                "total": 5,
+                "conversations": [
+                    {
+                        "checkpoint_id": "1f0aa458-40ec-6df3-8004-10848f5d6422",
+                        "timestamp": "2025-10-16T04:06:39.351300+00:00",
+                        "query": "genera un histograma",
+                        "llm_response": "Se generó un histograma...",
+                        "success": True,
+                        "response_metadata": {"type": "plot"}
+                    }
+                ]
             }
         }
