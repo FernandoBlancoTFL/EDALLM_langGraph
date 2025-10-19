@@ -103,9 +103,12 @@ output_path
 def run_python_with_df(code: str, error_context: Optional[str] = None):
     """
     Ejecuta código Python con acceso al DataFrame `df` ya cargado.
-    IMPORTANTE: Asume que el dataset correcto ya fue cargado por node_ejecutar_python.
+    CAPTURA STDOUT para obtener resultados de print().
     """
-    # Verificar que hay un dataset cargado (NO recargar)
+    from io import StringIO
+    import sys
+    
+    # Verificar que hay un dataset cargado
     if dataset_manager.df is None or not dataset_manager.dataset_loaded:
         return {
             "success": False,
@@ -116,20 +119,16 @@ def run_python_with_df(code: str, error_context: Optional[str] = None):
     
     code = sanitize_plot_code(code)
 
-    # NO recargar dataset aquí - debe estar ya cargado por node_ejecutar_python
-    # Solo verificar que existe
-    
-    # Contexto completo de ejecución con todos los módulos necesarios
+    # Contexto completo de ejecución
     local_vars = {
         "df": dataset_manager.df, 
         "pd": pd, 
         "plt": plt, 
         "sns": sns, 
         "os": os,
-        "np": pd.np if hasattr(pd, 'np') else None  # numpy si está disponible
+        "np": pd.np if hasattr(pd, 'np') else None
     }
     
-    # También agregar a globals para funciones definidas en el código
     global_vars = {
         "df": dataset_manager.df,
         "pd": pd,
@@ -149,9 +148,8 @@ def run_python_with_df(code: str, error_context: Optional[str] = None):
         "reemplaza con tu DataFrame"
     ]
     
-    # Validar patrones prohibidos de forma más inteligente
+    # Validar patrones prohibidos
     for pattern in prohibited_patterns:
-        # Usar regex para detectar creación real de DataFrames
         if pattern in ["pd.DataFrame(", "pandas.DataFrame(", "DataFrame("]:
             if re.search(r'(pd\.|pandas\.)?DataFrame\s*\(', code):
                 return {
@@ -168,27 +166,66 @@ def run_python_with_df(code: str, error_context: Optional[str] = None):
                 "error_type": "prohibited_pattern"
             }
 
+    # CAPTURAR STDOUT
+    old_stdout = sys.stdout
+    sys.stdout = captured_output = StringIO()
+    
     try:
         import ast
+        result = None
+        
         parsed = ast.parse(code)
         if parsed.body and isinstance(parsed.body[-1], ast.Expr):
+            # Ejecutar todo excepto la última expresión
             last_expr = parsed.body.pop()
             exec(compile(ast.Module(parsed.body, type_ignores=[]), filename="<ast>", mode="exec"), global_vars, local_vars)
+            # Evaluar la última expresión
             result = eval(compile(ast.Expression(last_expr.value), filename="<ast>", mode="eval"), global_vars, local_vars)
         else:
+            # Ejecutar todo el código
             exec(code, global_vars, local_vars)
             result = None
 
-        # NUEVO: Renombrar archivos de gráficos generados sin timestamp
+        # Obtener el output capturado
+        stdout_output = captured_output.getvalue()
+
+        # Restaurar stdout
+        sys.stdout = old_stdout
+
+        # NUEVO: Renombrar archivos de gráficos generados
         result = auto_rename_plot_files(result)
+
+        # Determinar el resultado final con validación segura
+        final_result = None
+
+        # Verificar stdout de forma segura
+        if isinstance(stdout_output, str) and len(stdout_output.strip()) > 0:
+            final_result = stdout_output.strip()
+        elif result is not None:
+            # Si result es un objeto de pandas, convertirlo a string
+            try:
+                if hasattr(result, 'to_string'):
+                    final_result = result.to_string()
+                elif hasattr(result, 'tolist'):
+                    final_result = str(result.tolist())
+                else:
+                    final_result = str(result)
+            except:
+                final_result = str(result)
+        else:
+            final_result = "✅ Código ejecutado con éxito."
 
         return {
             "success": True,
-            "result": result if result is not None else "✅ Código ejecutado con éxito.",
+            "result": final_result,
             "error": None,
             "error_type": None
         }
+        
     except Exception as e:
+        # Restaurar stdout en caso de error
+        sys.stdout = old_stdout
+        
         error_type = type(e).__name__
         return {
             "success": False,

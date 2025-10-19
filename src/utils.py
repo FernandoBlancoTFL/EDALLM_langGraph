@@ -119,6 +119,49 @@ def generate_unique_plot_filename(base_name: str) -> str:
     
     return unique_name
 
+def extract_text_data(result_text: str):
+    """
+    Extrae datos estructurados de resultados de texto.
+    Detecta listas, diccionarios y otros formatos estructurados.
+    """
+    import ast
+    
+    if not result_text or not isinstance(result_text, str):
+        return None
+    
+    try:
+        # Limpiar el texto
+        text = result_text.strip()
+        
+        if not text:
+            return None
+        
+        # Intentar parsear como expresión Python literal (listas, dicts, etc.)
+        lines = text.split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            # Detectar si la línea contiene una lista o diccionario
+            if (line.startswith('[') and line.endswith(']')) or \
+               (line.startswith('{') and line.endswith('}')):
+                try:
+                    parsed = ast.literal_eval(line)
+                    # Verificar que es un tipo serializable
+                    if isinstance(parsed, (list, dict, tuple, str, int, float, bool, type(None))):
+                        return parsed
+                except (ValueError, SyntaxError):
+                    continue
+        
+        # Si no se encontró formato estructurado, retornar el texto completo
+        return {"text": text}
+    
+    except Exception as e:
+        print(f"⚠️ Error extrayendo datos de texto: {e}")
+        # Si hay cualquier error, retornar el texto tal cual
+        if isinstance(result_text, str):
+            return {"text": result_text.strip()}
+        return None
+
 def extract_plot_filename_from_result(result_text: str) -> str:
     """
     Extrae el nombre del archivo de gráfico desde el texto de resultado.
