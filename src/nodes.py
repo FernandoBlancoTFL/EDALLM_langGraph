@@ -19,7 +19,7 @@ import dataset_manager
 
 # Inicializar LLM
 llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", google_api_key=API_KEY, temperature=0)
-# llm = ChatGroq(model="llama-3.1-8b-instant", api_key=GROQ_KEY, temperature=0)
+# llm = ChatGroq(model="meta-llama/llama-4-scout-17b-16e-instruct", api_key=GROQ_KEY, temperature=0)
 # llm = ChatOllama(model="gemma3", temperature=0)
 
 def nodo_estrategia_datos(state: AgentState):
@@ -60,6 +60,8 @@ def nodo_estrategia_datos(state: AgentState):
         state["memory_summary"] = memory_summary
         print(f"💭 Memoria recuperada: {len(state['conversation_history'])} conversaciones previas")
         print(f"📝 Resumen: {memory_summary[:100]}...")
+
+        print(f"Resumen completo: {memory_summary}")
         
         if not state.get("learned_patterns"):
             state["learned_patterns"] = extract_learned_patterns_from_history(state["conversation_history"])
@@ -168,7 +170,6 @@ def nodo_estrategia_datos(state: AgentState):
         - Filtros básicos
         - Agregaciones simples
         - Consultas similares a las exitosas anteriormente
-        - Siempre intenta ejecutar SQL antes que DATAFRAME si consideras que puede ser resuelto con SQL
 
         CRITERIOS PARA DATAFRAME:
         - Análisis estadísticos complejos

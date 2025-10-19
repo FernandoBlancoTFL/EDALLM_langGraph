@@ -1,0 +1,18 @@
+Historial: [
+    {'timestamp': '2025-10-16T01: 50: 38.484984', 'query': '¿Cuántas filas tiene el dataset de cocodrilos?', 'success': True, 'strategy_used': 'sql', 'dataset_used': 'crocodile_dataset_f1302fae', 'iterations': 1, 'errors': [], 'response': 'He analizado el dataset de cocodrilos y he encontrado que tiene 1000 filas. Esto significa que el dataset contiene información sobre 1000 cocodrilos individuales.'
+    },
+    {'timestamp': '2025-10-16T01: 51: 05.933901', 'query': 'genera un histograma de la columna Booking Value del dataframe de viajes', 'success': True, 'strategy_used': 'dataframe', 'dataset_used': 'ncr_ride_bookings_a2544d19', 'iterations': 1, 'errors': [], 'response': 'Se generó un histograma que muestra la distribución de los valores de reserva. La mayoría de las reservas parecen concentrarse en un rango de valores más bajos, con una frecuencia decreciente a medida que aumenta el valor de la reserva.'
+    },
+    {'timestamp': '2025-10-16T14: 05: 00.542341', 'query': '¿Cuántas filas tiene el dataset de viajes?', 'success': True, 'strategy_used': 'sql', 'dataset_used': 'ncr_ride_bookings_a2544d19', 'iterations': 1, 'errors': [], 'response': 'He analizado el dataset de viajes y he encontrado que tiene 150,
+        000 filas. Esto significa que el conjunto de datos contiene información sobre 150,
+        000 viajes individuales.'
+    },
+    {'timestamp': '2025-10-16T14: 07: 03.648796', 'query': 'Genera un gráfico de dispersión que muestre la relación entre la longitud observada (en metros) y el peso observado (en kilogramos) de los cocodrilos, asegurándote de que el gráfico se vea claro, con ejes etiquetados y un estilo visual atractivo ', 'success': True, 'strategy_used': 'dataframe', 'dataset_used': 'crocodile_dataset_f1302fae', 'iterations': 1, 'errors': [], 'response': 'El gráfico de dispersión muestra una clara tendencia positiva entre la longitud y el peso de los cocodrilos: a mayor longitud, mayor peso. Parece haber una relación bastante fuerte, aunque con cierta variabilidad, lo que sugiere que otros factores además de la longitud también influyen en el peso.'
+    },
+    {'timestamp': '2025-10-16T17: 58: 44.669416', 'query': ' ¿Cuántas filas tiene el dataset de cocodrilos?', 'success': True, 'strategy_used': 'sql', 'dataset_used': 'crocodile_dataset_f1302fae', 'iterations': 1, 'errors': [], 'response': 'He analizado el dataset de cocodrilos y he encontrado que tiene 1000 filas. Esto significa que el dataset contiene información sobre 1000 cocodrilos individuales.'
+    },
+    {'timestamp': '2025-10-16T18: 02: 37.615475', 'query': ' ¿Cuántas filas tiene el dataset de cocodrilos?', 'success': True, 'strategy_used': 'sql', 'dataset_used': 'crocodile_dataset_f1302fae', 'iterations': 1, 'errors': [], 'response': 'He analizado el dataset de cocodrilos y he encontrado que tiene 1000 filas. Esto significa que el dataset contiene información sobre 1000 cocodrilos individuales.'
+    },
+    {'timestamp': '2025-10-16T18: 14: 09.807574', 'query': ' ¿Cuántas filas tiene el dataset de cocodrilos?', 'success': True, 'strategy_used': 'sql', 'dataset_used': 'crocodile_dataset_f1302fae', 'iterations': 1, 'errors': [], 'response': 'He analizado el dataset de cocodrilos y he encontrado que tiene 1000 filas. Esto significa que el dataset contiene información sobre 1000 cocodrilos individuales.'
+    }
+]

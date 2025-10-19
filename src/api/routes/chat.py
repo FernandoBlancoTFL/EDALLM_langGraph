@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from datetime import datetime
 from state import AgentState
-from utils import extract_plot_filename_from_result, get_plot_metadata
+from utils import extract_plot_filename_from_result, extract_text_data, get_plot_metadata
 import sys
 import os
 
@@ -301,6 +301,25 @@ def extract_response_data(state: dict, response_type: str):
                 "total_rows": len(sql_results.get("data", []))
             }
         return None
+
+    elif response_type == "text":
+        # Extraer datos de texto del execution_history o result
+        text_data = None
+        
+        # Buscar en execution_history el último resultado exitoso
+        for record in reversed(state.get("execution_history", [])):
+            if record.get("success") and record.get("result"):
+                result_text = record.get("result", "")
+                # Intentar extraer datos estructurados del resultado
+                text_data = extract_text_data(result_text)
+                if text_data:
+                    break
+        
+        # Si no se encontró en execution_history, buscar en result directo
+        if not text_data and state.get("result"):
+            text_data = extract_text_data(state["result"])
+        
+        return text_data if text_data else None
     
     elif response_type == "error":
         return {
