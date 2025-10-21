@@ -25,10 +25,6 @@ def main():
 
     # Configurar sistema de conexión de datos
     setup_data_connection()
-
-    # print("🔄 Inicializando sistema de dataset...")
-    # if not initialize_dataset_on_startup():
-    #     print("⚠️ Advertencia: Error en inicialización del dataset, continuando con funcionalidad limitada")
     
     # configurar PostgresSaver (después de que existe la BD)
     postgres_saver = setup_postgres_saver()
@@ -43,8 +39,6 @@ def main():
     thread_id = get_automatic_thread_id()
     
     print("🚀 Sistema de Análisis de Datos con Memoria Persistente")
-    # print("   Memoria automática activada para usuario único")
-    # print("   Dataset se cargará al hacer la primera consulta")
     print("   Escribe 'salir' para terminar\n")
     
     # Mostrar archivos almacenados

@@ -12,7 +12,7 @@ def route_after_classification(state: AgentState):
     print(f"   Action: {action}")
     print(f"   Strategy: {data_strategy}")
     
-    # NUEVO: Manejar casos donde no hay dataset disponible/válido
+    # Manejar casos donde no hay dataset disponible/válido
     if data_strategy in ["no_dataset", "no_match"]:
         print("   → Routing to: responder (sin dataset)")
         return "responder"
@@ -42,12 +42,6 @@ def route_after_validation_modificado(state: AgentState):
     max_iterations = state.get("max_iterations", 3)
     needs_fallback = state.get("needs_fallback", False)
     current_strategy = state.get("data_strategy", "dataframe")
-    
-    # print(f"\n🔧 DEBUG route_after_validation_modificado:")
-    # print(f"   Success: {success}")
-    # print(f"   Iteration: {iteration_count}")
-    # print(f"   Strategy: {current_strategy}")
-    # print(f"   Needs fallback: {needs_fallback}")
     
     if success:
         print("   → Routing to: responder (success)")

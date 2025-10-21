@@ -29,17 +29,17 @@ def build_code_prompt(query: str, execution_history: List[dict] = None, df_info:
         1. Usa EXCLUSIVAMENTE el DataFrame 'df' que ya está cargado
         2. NO crees ni simules nuevos DataFrames ni datos de ejemplo
         3. Para gráficos:
-           - NUNCA uses plt.show() - está PROHIBIDO
-           - SIEMPRE guarda con plt.savefig() en './src/outputs/'
-           - Usa nombres descriptivos sin timestamp: 'histogram_edad.png', 'scatter_ventas.png', etc.
-           - Después de guardar, usa plt.close() para liberar memoria
-           - SIEMPRE retorna la ruta del archivo guardado como última línea
-           - Ejemplo correcto:
-             plt.figure(figsize=(10,6))
-             df['edad'].hist()
-             plt.savefig('./src/outputs/histogram_edad.png', dpi=300, bbox_inches='tight')
-             plt.close()
-             './src/outputs/histogram_edad.png'
+        - NUNCA uses plt.show() - está PROHIBIDO
+        - SIEMPRE guarda con plt.savefig() en './src/outputs/'
+        - Usa nombres descriptivos sin timestamp: 'histogram_edad.png', 'scatter_ventas.png', etc.
+        - Después de guardar, usa plt.close() para liberar memoria
+        - SIEMPRE retorna la ruta del archivo guardado como última línea
+        - Ejemplo correcto:
+            plt.figure(figsize=(10,6))
+            df['edad'].hist()
+            plt.savefig('./src/outputs/histogram_edad.png', dpi=300, bbox_inches='tight')
+            plt.close()
+            './src/outputs/histogram_edad.png'
         4. Si trabajas con columnas de tiempo, verifica su tipo primero
         5. NO generes comentarios, Type hints o anotaciones en el código. Responde SOLO con código Python ejecutable, sin explicaciones ni markdown
 

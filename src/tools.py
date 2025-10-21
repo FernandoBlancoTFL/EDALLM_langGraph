@@ -192,7 +192,7 @@ def run_python_with_df(code: str, error_context: Optional[str] = None):
         # Restaurar stdout
         sys.stdout = old_stdout
 
-        # NUEVO: Renombrar archivos de gráficos generados
+        # Renombrar archivos de gráficos generados
         result = auto_rename_plot_files(result)
 
         # Determinar el resultado final con validación segura
@@ -324,7 +324,7 @@ def plot_histogram(column: str):
     plt.ylabel("Frecuencia", fontsize=12)
     plt.grid(axis="y", alpha=0.5)
 
-    # MODIFICADO: Usar nombre único con timestamp
+    # Usar nombre único con timestamp
     unique_filename = generate_unique_plot_filename(f"histogram_{column}")
     file_path = f"./src/outputs/{unique_filename}"
     plt.savefig(file_path, dpi=300, bbox_inches="tight")
@@ -342,7 +342,7 @@ def plot_correlation_heatmap(_):
     sns.heatmap(numeric_cols.corr(), annot=True, cmap="coolwarm", fmt=".2f")
     plt.title("Mapa de calor de correlaciones", fontsize=16)
 
-    # MODIFICADO: Usar nombre único con timestamp
+    # Usar nombre único con timestamp
     unique_filename = generate_unique_plot_filename("correlation_heatmap")
     file_path = f"./src/outputs/{unique_filename}"
     plt.savefig(file_path, dpi=300, bbox_inches="tight")
@@ -363,7 +363,7 @@ def plot_time_series(_):
     plt.ylabel("Cantidad de viajes", fontsize=12)
     plt.grid(True, alpha=0.5)
 
-    # MODIFICADO: Usar nombre único con timestamp
+    # Usar nombre único con timestamp
     unique_filename = generate_unique_plot_filename("time_series")
     file_path = f"./src/outputs/{unique_filename}"
     plt.savefig(file_path, dpi=300, bbox_inches="tight")
@@ -385,7 +385,7 @@ def plot_payment_method_distribution(_):
     plt.xticks(rotation=45, ha="right")
     plt.grid(axis="y", alpha=0.5)
 
-    # MODIFICADO: Usar nombre único con timestamp
+    # Usar nombre único con timestamp
     unique_filename = generate_unique_plot_filename("payment_method_distribution")
     file_path = f"./src/outputs/{unique_filename}"
     plt.savefig(file_path, dpi=300, bbox_inches="tight")

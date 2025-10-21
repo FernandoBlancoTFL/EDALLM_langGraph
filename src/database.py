@@ -122,7 +122,7 @@ def setup_data_connection():
         db_config = load_db_config()
         connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
         
-        # 🔧 CRÍTICO: Usar autocommit para evitar transacciones abiertas
+        # Usar autocommit para evitar transacciones abiertas
         data_connection = psycopg.connect(connection_string, autocommit=True)
         print("✅ Conexión de datos configurada con autocommit")
         return True
@@ -150,7 +150,7 @@ def get_table_metadata_light(table_name: str):
         temp_connection = False
     
     try:
-        # NUEVO: Intentar encontrar la tabla real si se pasó un nombre parcial
+        # Intentar encontrar la tabla real si se pasó un nombre parcial
         actual_table_name = table_name
         
         with conn.cursor() as cursor:
@@ -202,7 +202,7 @@ def get_table_metadata_light(table_name: str):
                 "dtypes": {col[0]: col[1] for col in columns_info},
                 "row_count": row_count,
                 "nullable": {col[0]: col[2] == 'YES' for col in columns_info},
-                "actual_table_name": actual_table_name  # NUEVO: Incluir nombre real
+                "actual_table_name": actual_table_name  # Incluir nombre real
             }
             
     except Exception as e:

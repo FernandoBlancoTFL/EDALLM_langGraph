@@ -19,17 +19,17 @@ import dataset_manager
 
 # Inicializar LLM
 llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", google_api_key=API_KEY, temperature=0)
-# llm = ChatGroq(model="meta-llama/llama-4-scout-17b-16e-instruct", api_key=GROQ_KEY, temperature=0)
+# llm = ChatGroq(model="llama-3.3-70b-versatile", api_key=GROQ_KEY, temperature=0)
 # llm = ChatOllama(model="gemma3", temperature=0)
 
 def nodo_estrategia_datos(state: AgentState):
     """
     Recupera historial desde PostgresSaver y actualiza contexto.
-    MODIFICADO: Detiene ejecución si no encuentra dataset válido.
+    Detiene ejecución si no encuentra dataset válido.
     """
     print("🧠 Iniciando análisis con recuperación de memoria...")
 
-    # DETECCIÓN 0: Consultas generales (saludos, ayuda, conversación) - ANTES DE TODO
+    # DETECCIÓN 0: Consultas generales (saludos, ayuda, conversación)
     is_general, general_type, general_response = is_general_query(state["query"])
     if is_general:
         print(f"💬 Consulta general detectada ({general_type}) - Respuesta instantánea")
@@ -85,7 +85,7 @@ def nodo_estrategia_datos(state: AgentState):
     if not state.get("available_datasets"):
         state["available_datasets"] = get_all_available_datasets()
     
-    # NUEVO: Validar que haya datasets disponibles
+    # Validar que haya datasets disponibles
     if not state["available_datasets"]:
         print("❌ No hay datasets disponibles en la base de datos")
         state["data_strategy"] = "no_dataset"
@@ -108,7 +108,7 @@ def nodo_estrategia_datos(state: AgentState):
             state["user_context"]
         )
         
-        # NUEVO: Validar que se seleccionó un dataset válido
+        # Validar que se seleccionó un dataset válido
         if selected_dataset is None:
             print("❌ No se pudo identificar un dataset apropiado para la consulta")
             state["data_strategy"] = "no_match"
@@ -292,14 +292,14 @@ def node_clasificar_modificado(state: AgentState):
     return state
 
 def nodo_sql_executor(state: AgentState):
-    """NUEVO: Ejecuta consultas SQL directamente en la base de datos"""
+    """Ejecuta consultas SQL directamente en la base de datos"""
     
     print("🗃️ Ejecutando consulta SQL...")
 
     # Obtener metadatos y nombre real de tabla
     table_metadata = get_table_metadata_light(state['selected_dataset'])
     
-    # NUEVO: Usar el nombre real de la tabla si está disponible
+    # Usar el nombre real de la tabla si está disponible
     actual_table_name = table_metadata.get('actual_table_name', state['selected_dataset'])
     
     if actual_table_name != state['selected_dataset']:
@@ -565,10 +565,10 @@ def node_responder(state: AgentState):
             # Ya tiene respuesta generada, solo mostrarla
             respuesta = state["result"]
             print(f"\n🤖 Respuesta Final:\n{respuesta}")
-            # NUEVO: Guardar respuesta LLM
+            # Guardar respuesta LLM
             state["llm_response"] = respuesta
 
-            # NUEVO: Preparar metadata de respuesta para checkpoint
+            # Preparar metadata de respuesta para checkpoint
             state["response_metadata"] = prepare_response_metadata(state)
             print(f"💾 Metadata guardada en checkpoint: {state['response_metadata']['type']}")
             
@@ -688,10 +688,10 @@ def node_responder(state: AgentState):
             respuesta = llm.invoke(prompt).content
             print(f"\n🤖 Respuesta Final:\n{respuesta}")
 
-            # NUEVO: Guardar respuesta LLM
+            # Guardar respuesta LLM
             state["llm_response"] = respuesta
 
-            # NUEVO: Preparar metadata de respuesta para checkpoint
+            # Preparar metadata de respuesta para checkpoint
             state["response_metadata"] = prepare_response_metadata(state)
             print(f"💾 Metadata guardada en checkpoint: {state['response_metadata']['type']}")
     
@@ -716,10 +716,10 @@ def node_responder(state: AgentState):
         respuesta = llm.invoke(prompt).content
         print(f"\n🤖 Respuesta Final:\n{respuesta}")
 
-        # NUEVO: Guardar la respuesta del LLM en el estado
+        # Guardar la respuesta del LLM en el estado
         state["llm_response"] = respuesta
 
-        # NUEVO: Preparar metadata de respuesta para checkpoint
+        # Preparar metadata de respuesta para checkpoint
         state["response_metadata"] = prepare_response_metadata(state)
         print(f"💾 Metadata de error guardada en checkpoint")
     

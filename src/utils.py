@@ -56,7 +56,6 @@ def show_stored_files():
     """
     Muestra los archivos almacenados en la BD de forma amigable.
     """
-    # print("🔍 Buscando tablas en la base de datos...")
     stored_tables = list_stored_tables()
     
     if not stored_tables:
@@ -76,8 +75,6 @@ def show_conversation_memory(thread_id: str):
     """
     Muestra un resumen de la memoria de conversación para debugging.
     """
-    # Primero hacer debugging de la estructura
-    # debug_checkpoint_structure(thread_id)
     
     conversation_history, user_context = load_conversation_history(thread_id)
     
@@ -165,7 +162,7 @@ def extract_text_data(result_text: str):
 def extract_plot_filename_from_result(result_text: str) -> str:
     """
     Extrae el nombre del archivo de gráfico desde el texto de resultado.
-    MEJORADO: Ahora captura más patrones.
+    Ahora captura más patrones.
     
     Args:
         result_text: Texto que contiene la ruta del archivo guardado

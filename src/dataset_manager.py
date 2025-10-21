@@ -51,7 +51,7 @@ def sanitize_column_name(column_name: str) -> str:
 def check_dataset_table_exists(connection=None, table_name=None, table_schema='public'):
     """
     Verifica si una tabla específica existe en PostgreSQL.
-    MODIFICADO: Ya no usa valores por defecto de config, requiere table_name explícito.
+    Ya no usa valores por defecto de config, requiere table_name explícito.
     """
     conn = connection
     
@@ -194,7 +194,7 @@ def list_stored_tables(connection=None):
 def create_dataset_table_from_df(df: pd.DataFrame, connection=None, table_name=None, table_schema='public', semantic_description=None):
     """
     Crea una tabla en PostgreSQL desde un DataFrame.
-    MODIFICADO: Requiere table_name explícito, no usa valores por defecto de config.
+    Requiere table_name explícito, no usa valores por defecto de config.
     """
     conn = connection
     
@@ -355,7 +355,7 @@ def insert_dataframe_to_table(df: pd.DataFrame, column_mapping: dict, connection
 def generate_semantic_description_with_llm(df: pd.DataFrame, table_name: str, filename: str = None) -> str:
     """
     Genera una descripción semántica del dataset usando LLM.
-    MODIFICADO: Ya no requiere ruta de archivo, usa filename opcional.
+    Ya no requiere ruta de archivo, usa filename opcional.
     """
     from nodes import llm
 
@@ -377,32 +377,32 @@ def generate_semantic_description_with_llm(df: pd.DataFrame, table_name: str, fi
         filename_str = f"- Nombre de archivo: {filename}" if filename else ""
         
         prompt = f"""
-Analiza este dataset y genera una descripción semántica clara y concisa.
+            Analiza este dataset y genera una descripción semántica clara y concisa.
 
-INFORMACIÓN DEL DATASET:
-{filename_str}
-- Nombre de tabla: {table_name}
-- Cantidad de filas: {row_count}
-- Columnas ({len(df.columns)}): {columns_info}
+            INFORMACIÓN DEL DATASET:
+            {filename_str}
+            - Nombre de tabla: {table_name}
+            - Cantidad de filas: {row_count}
+            - Columnas ({len(df.columns)}): {columns_info}
 
-TIPOS DE DATOS:
-{dtypes_info}
+            TIPOS DE DATOS:
+            {dtypes_info}
 
-MUESTRA DE DATOS (primeras 5 filas):
-{sample_data}
+            MUESTRA DE DATOS (primeras 5 filas):
+            {sample_data}
 
-{f"ESTADÍSTICAS NUMÉRICAS:{numeric_stats}" if numeric_stats else ""}
+            {f"ESTADÍSTICAS NUMÉRICAS:{numeric_stats}" if numeric_stats else ""}
 
-TAREA:
-Genera una descripción semántica de 2-3 oraciones que explique:
-1. Qué tipo de datos contiene este dataset
-2. Para qué análisis o consultas podría ser útil
-3. Características principales (temporal, geográfico, transaccional, etc.)
+            TAREA:
+            Genera una descripción semántica de 2-3 oraciones que explique:
+            1. Qué tipo de datos contiene este dataset
+            2. Para qué análisis o consultas podría ser útil
+            3. Características principales (temporal, geográfico, transaccional, etc.)
 
-La descripción debe ser clara, directa y útil para que un LLM pueda decidir si este dataset es relevante para una consulta de usuario.
+            La descripción debe ser clara, directa y útil para que un LLM pueda decidir si este dataset es relevante para una consulta de usuario.
 
-Responde SOLO con la descripción, sin formato adicional.
-"""
+            Responde SOLO con la descripción, sin formato adicional.
+        """
         
         response = llm.invoke(prompt).content.strip()
         
@@ -419,7 +419,7 @@ Responde SOLO con la descripción, sin formato adicional.
 def ensure_dataset_loaded(state=None):
     """
     Función para cargar el dataset solo cuando sea necesario.
-    MEJORADO: Ahora mapea automáticamente nombres parciales al nombre completo de la tabla.
+    Ahora mapea automáticamente nombres parciales al nombre completo de la tabla.
     """
     global dataset_info, df, dataset_loaded
     
@@ -455,7 +455,7 @@ def ensure_dataset_loaded(state=None):
         return False
     
     try:
-        # MEJORADO: Buscar la tabla real (puede ser nombre parcial)
+        # Buscar la tabla real (puede ser nombre parcial)
         actual_table_name = target_dataset
         
         with dataset_connection.cursor() as cursor:

@@ -53,7 +53,7 @@ def setup_postgres_saver_alternative():
         db_config = load_db_config()
         postgres_uri = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
         
-        # SOLUCIÓN: Crear conexión con autocommit=True para evitar problemas con CREATE INDEX CONCURRENTLY
+        # Crear conexión con autocommit=True para evitar problemas con CREATE INDEX CONCURRENTLY
         conn = psycopg.connect(postgres_uri, autocommit=True)
         
         # Crear PostgresSaver con la conexión configurada
@@ -124,7 +124,7 @@ def load_conversation_history(thread_id: str):
     try:
         config = {"configurable": {"thread_id": thread_id}}
         
-        # MÉTODO 1: Intentar con get_tuple (más reciente)
+        # MÉTODO 1: Intentar con get_tuple
         try:
             checkpoint_tuple = postgres_saver.get_tuple(config)
             if checkpoint_tuple and checkpoint_tuple.checkpoint:

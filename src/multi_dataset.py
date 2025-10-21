@@ -8,7 +8,7 @@ from database import load_db_config
 def get_all_available_datasets(connection=None):
     """
     Obtiene metadatos completos de todos los datasets disponibles en la BD.
-    MODIFICADO: Ya no busca archivos Excel, solo trabaja con tablas en BD subidas por usuarios.
+    Ya no busca archivos Excel, solo trabaja con tablas en BD subidas por usuarios.
     """
     conn = connection
     available_datasets = {}
@@ -196,7 +196,7 @@ def get_semantic_descriptions_from_db(connection=None):
 def identify_dataset_with_llm(query: str, available_datasets: dict, semantic_descriptions: dict, user_context: dict) -> str:
     """
     Usa LLM para seleccionar el dataset más apropiado basándose en descripciones semánticas.
-    MODIFICADO: Retorna None si no encuentra un dataset válido en lugar de usar fallback.
+    Retorna None si no encuentra un dataset válido en lugar de usar fallback.
     """
     if not available_datasets:
         print("⚠️ No hay datasets disponibles")
@@ -204,7 +204,7 @@ def identify_dataset_with_llm(query: str, available_datasets: dict, semantic_des
     
     # Construir lista de datasets con sus descripciones
     datasets_info = []
-    table_name_mapping = {}  # NUEVO: Mapeo de nombre amigable → nombre real
+    table_name_mapping = {}  # Mapeo de nombre amigable → nombre real
     
     for table_name, info in available_datasets.items():
         semantic_desc = semantic_descriptions.get(table_name, info.get("description", "Sin descripción"))
@@ -217,7 +217,7 @@ def identify_dataset_with_llm(query: str, available_datasets: dict, semantic_des
         # Obtener nombre amigable (sin sufijo)
         friendly_name = info.get('friendly_name', table_name)
         
-        # NUEVO: Guardar mapeo
+        # Guardar mapeo
         table_name_mapping[friendly_name.lower()] = table_name
         table_name_mapping[table_name.lower()] = table_name  # También mapear el nombre completo
         
@@ -237,26 +237,26 @@ Cantidad de filas: {info.get('row_count', 'N/A')}
             common_datasets_info = f"\nDATASETS MÁS USADOS POR EL USUARIO: {', '.join(valid_common)}"
     
     prompt = f"""
-Analiza la consulta del usuario y selecciona el dataset MÁS apropiado.
+        Analiza la consulta del usuario y selecciona el dataset MÁS apropiado.
 
-CONSULTA DEL USUARIO:
-{query}
-{common_datasets_info}
+        CONSULTA DEL USUARIO:
+        {query}
+        {common_datasets_info}
 
-DATASETS DISPONIBLES:
-{chr(10).join(datasets_info)}
+        DATASETS DISPONIBLES:
+        {chr(10).join(datasets_info)}
 
-INSTRUCCIONES:
-- Selecciona el dataset cuya descripción mejor coincida con la intención de la consulta
-- Considera el contexto semántico, no solo palabras clave exactas
-- Si el usuario menciona análisis previos, considera los datasets más usados
-- Si hay ambigüedad, elige el dataset más relevante semánticamente
+        INSTRUCCIONES:
+        - Selecciona el dataset cuya descripción mejor coincida con la intención de la consulta
+        - Considera el contexto semántico, no solo palabras clave exactas
+        - Si el usuario menciona análisis previos, considera los datasets más usados
+        - Si hay ambigüedad, elige el dataset más relevante semánticamente
 
-IMPORTANTE: Responde SOLO con el Dataset ID completo (ejemplo: crocodile_dataset_303cf324)
-NO uses nombres cortos o amigables. Usa el ID exacto que aparece en "Dataset ID:" arriba.
+        IMPORTANTE: Responde SOLO con el Dataset ID completo (ejemplo: crocodile_dataset_303cf324)
+        NO uses nombres cortos o amigables. Usa el ID exacto que aparece en "Dataset ID:" arriba.
 
-Responde SOLO con el Dataset ID, sin explicaciones:
-"""
+        Responde SOLO con el Dataset ID, sin explicaciones:
+    """
     
     try:
         from nodes import llm
@@ -286,7 +286,7 @@ Responde SOLO con el Dataset ID, sin explicaciones:
                     actual_table_name = table
                     break
         
-        # MODIFICADO: No usar fallback, retornar None si no hay coincidencia
+        # No usar fallback, retornar None si no hay coincidencia
         if actual_table_name:
             print(f"🤖 LLM seleccionó dataset: {actual_table_name}")
             if actual_table_name.lower() != selected:
@@ -354,7 +354,7 @@ def identify_dataset_from_query(query: str, available_datasets: dict) -> str:
 def identify_dataset_from_query_with_memory(query: str, available_datasets: dict, user_context: dict) -> str:
     """
     Versión mejorada que usa LLM con descripciones semánticas.
-    MODIFICADO: Ahora prioriza selección por LLM usando descripciones semánticas.
+    Ahora prioriza selección por LLM usando descripciones semánticas.
     """
     if not available_datasets:
         return None
