@@ -17,3 +17,6 @@ import warnings
 warnings.filterwarnings('ignore', message='.*ALTS.*')
 os.environ['GRPC_VERBOSITY'] = 'ERROR'
 os.environ['GRPC_TRACE'] = ''
+
+# Convertir el mal formato de fechas a números decimales de los documentos subidos
+ENABLE_DATE_FORMAT = True

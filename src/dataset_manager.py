@@ -5,7 +5,7 @@ from typing import Optional
 from database import load_db_config, data_connection
 from config import ENABLE_AUTO_SAVE_TO_DB
 import re
-from datetime import datetime
+from datetime import datetime, date
 
 # Variables globales para el dataset
 dataset_info = None
@@ -530,3 +530,137 @@ def ensure_dataset_loaded(state=None):
     finally:
         if dataset_connection:
             dataset_connection.close()
+
+def clean_mixed_date_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Detecta columnas con mezcla de datetime/fechas y números decimales.
+    Solo en esos casos, convierte las fechas/datetime a formato decimal (mes.día).
+    
+    Ejemplos de conversión:
+    - datetime(2025, 9, 1) -> 1.9
+    - "2025-09-01" -> 1.9
+    - "2025-09-04" -> 4.9
+    - 3.14 -> 3.14 (sin cambios)
+    
+    Args:
+        df: DataFrame a procesar
+        
+    Returns:
+        DataFrame con columnas procesadas
+    """
+    df_copy = df.copy()
+    
+    for col in df_copy.columns:
+        # Análisis de la columna
+        tiene_datetime = False
+        tiene_numeros_puros = False
+        
+        # Analizar valores no nulos
+        valores_no_nulos = df_copy[col].dropna()
+        
+        if len(valores_no_nulos) == 0:
+            continue
+        
+        # Contar tipos de datos
+        count_datetime = 0
+        count_numeros = 0
+        
+        for valor in valores_no_nulos:
+            # Detectar datetime objects
+            if isinstance(valor, (datetime, date, pd.Timestamp)):
+                count_datetime += 1
+            # Detectar números (int, float) pero NO strings que parezcan fechas
+            elif isinstance(valor, (int, float)) and not isinstance(valor, bool):
+                # Verificar que sea un número real, no NaN
+                if pd.notna(valor):
+                    count_numeros += 1
+            # Detectar strings con formato de fecha
+            elif isinstance(valor, str):
+                valor_str = valor.strip()
+                # Patrones de fecha
+                patrones_fecha = [
+                    r'^\d{4}-\d{1,2}-\d{1,2}',      # YYYY-MM-DD
+                    r'^\d{1,2}/\d{1,2}/\d{4}',      # MM/DD/YYYY
+                    r'^\d{1,2}-\d{1,2}-\d{4}',      # MM-DD-YYYY
+                ]
+                es_fecha = any(re.match(patron, valor_str) for patron in patrones_fecha)
+                
+                if es_fecha:
+                    count_datetime += 1
+                else:
+                    # Intentar convertir a número
+                    try:
+                        float(valor_str)
+                        count_numeros += 1
+                    except:
+                        pass
+        
+        tiene_datetime = count_datetime > 0
+        tiene_numeros_puros = count_numeros > 0
+        
+        # SOLO procesar si tiene AMBOS: datetime/fechas Y números puros
+        if tiene_datetime and tiene_numeros_puros:
+            print(f"🔄 Columna '{col}' tiene mezcla ({count_datetime} fechas, {count_numeros} números) - Convirtiendo fechas a decimal...")
+            df_copy[col] = df_copy[col].apply(_convertir_fecha_a_decimal)
+        elif tiene_datetime and not tiene_numeros_puros:
+            print(f"ℹ️ Columna '{col}' solo tiene fechas ({count_datetime}) - Sin cambios")
+        elif tiene_numeros_puros and not tiene_datetime:
+            print(f"ℹ️ Columna '{col}' solo tiene números ({count_numeros}) - Sin cambios")
+    
+    return df_copy
+
+
+def _convertir_fecha_a_decimal(valor):
+    """
+    Convierte fechas/datetime a formato decimal día.mes
+    Mantiene números decimales como están.
+    
+    Ejemplos:
+    - datetime(2025, 9, 1) -> 1.9
+    - "2025-09-01" -> 1.9
+    - "2025-09-04" -> 4.9
+    - 3.14 -> 3.14 (sin cambios)
+    """
+    if pd.isna(valor):
+        return valor
+    
+    # Caso 1: datetime, date o Timestamp objects
+    if isinstance(valor, (datetime, date, pd.Timestamp)):
+        day = valor.day
+        month = valor.month
+        return float(f"{day}.{month}")
+    
+    # Caso 2: Números puros (int, float)
+    if isinstance(valor, (int, float)) and not isinstance(valor, bool):
+        return float(valor)
+    
+    # Caso 3: Strings
+    if isinstance(valor, str):
+        valor_str = valor.strip()
+        
+        # Patrón 1: YYYY-MM-DD o YYYY-M-D
+        match = re.match(r'^(\d{4})-(\d{1,2})-(\d{1,2})', valor_str)
+        if match:
+            year, month, day = match.groups()
+            return float(f"{int(day)}.{int(month)}")
+        
+        # Patrón 2: MM/DD/YYYY o M/D/YYYY
+        match = re.match(r'^(\d{1,2})/(\d{1,2})/(\d{4})', valor_str)
+        if match:
+            month, day, year = match.groups()
+            return float(f"{int(day)}.{int(month)}")
+        
+        # Patrón 3: MM-DD-YYYY o M-D-YYYY
+        match = re.match(r'^(\d{1,2})-(\d{1,2})-(\d{4})', valor_str)
+        if match:
+            month, day, year = match.groups()
+            return float(f"{int(day)}.{int(month)}")
+        
+        # Si no es fecha, intentar convertir a número
+        try:
+            return float(valor_str)
+        except:
+            return valor
+    
+    # Valor sin cambios si no coincide con ningún caso
+    return valor

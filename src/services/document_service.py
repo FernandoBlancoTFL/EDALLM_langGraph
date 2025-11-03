@@ -6,7 +6,9 @@ from typing import List, Tuple, Optional
 from datetime import datetime
 from database import load_db_config, data_connection
 from utils import calculate_file_hash
+from config import ENABLE_DATE_FORMAT
 from dataset_manager import (
+    clean_mixed_date_columns,
     create_dataset_table_from_df,
     insert_dataframe_to_table,
     generate_semantic_description_with_llm,
@@ -178,6 +180,7 @@ class DocumentService:
         """
         Procesa y almacena un documento en la BD.
         MODIFICADO: Elimina archivo temporal después de procesarlo.
+        NUEVO: Limpia columnas con mezcla de fechas y números decimales.
         """
         # Validar archivo
         is_valid, error = self._validate_file(filename)
@@ -200,7 +203,7 @@ class DocumentService:
         else:
             should_close = False
 
-        temp_filepath = None  # NUEVO: Para rastrear el archivo temporal
+        temp_filepath = None  # Para rastrear el archivo temporal
 
         try:
             # Verificar si ya existe un archivo con el mismo hash
@@ -229,7 +232,7 @@ class DocumentService:
             # Generar nombre de tabla
             table_name = self._generate_table_name(filename, file_id)
 
-            # MODIFICADO: Guardar archivo temporal solo para lectura
+            # Guardar archivo temporal solo para lectura
             temp_filepath = os.path.join(self.uploads_dir, f"{file_id}_{filename}")
             with open(temp_filepath, 'wb') as f:
                 f.write(file_content)
@@ -248,6 +251,12 @@ class DocumentService:
                     raise ValueError(f"Extensión no soportada: {ext}")
 
                 print(f"📊 Archivo leído: {len(df)} filas, {len(df.columns)} columnas")
+
+                if(ENABLE_DATE_FORMAT):
+                    # Limpiar columnas con mezcla de fechas y números
+                    print(f"🧹 Analizando columnas para detectar mezclas de fechas y números...")
+                    df = clean_mixed_date_columns(df)
+                    print(f"✅ Limpieza completada")
 
                 # Generar descripción semántica con LLM
                 print(f"🤖 Generando descripción semántica con LLM...")
@@ -309,14 +318,13 @@ class DocumentService:
                 }
 
             finally:
-                # NUEVO: Eliminar archivo temporal después de procesarlo
+                # Eliminar archivo temporal después de procesarlo
                 if temp_filepath and os.path.exists(temp_filepath):
                     try:
                         os.remove(temp_filepath)
                         print(f"🗑️ Archivo temporal eliminado: {temp_filepath}")
                     except Exception as e:
                         print(f"⚠️ No se pudo eliminar archivo temporal: {e}")
-                # print(f"⚠️ No elimino archivo temporal")
 
         finally:
             if should_close:
