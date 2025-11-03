@@ -259,8 +259,8 @@ Cantidad de filas: {info.get('row_count', 'N/A')}
     """
     
     try:
-        from nodes import llm
-        response = llm.invoke(prompt).content.strip()
+        from nodes import llm_documentHandler
+        response = llm_documentHandler.invoke(prompt).content.strip()
         
         # Limpiar respuesta
         selected = response.replace('"', '').replace("'", "").strip().lower()

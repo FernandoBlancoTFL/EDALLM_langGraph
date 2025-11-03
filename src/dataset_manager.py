@@ -4,6 +4,8 @@ import psycopg
 from typing import Optional
 from database import load_db_config, data_connection
 from config import ENABLE_AUTO_SAVE_TO_DB
+import re
+from datetime import datetime
 
 # Variables globales para el dataset
 dataset_info = None
@@ -45,7 +47,7 @@ def sanitize_column_name(column_name: str) -> str:
     # Asegurar que no empiece con número
     if clean_name and clean_name[0].isdigit():
         clean_name = f'col_{clean_name}'
-    
+
     return clean_name or 'unnamed_column'
 
 def check_dataset_table_exists(connection=None, table_name=None, table_schema='public'):
@@ -54,29 +56,29 @@ def check_dataset_table_exists(connection=None, table_name=None, table_schema='p
     Ya no usa valores por defecto de config, requiere table_name explícito.
     """
     conn = connection
-    
+
     if conn is None:
         print("⚠️ No se puede verificar tabla: no hay conexión disponible")
         return False
-    
+
     if table_name is None:
         print("⚠️ No se especificó nombre de tabla para verificar")
         return False
-    
+
     try:
         with conn.cursor() as cursor:
             cursor.execute("""
                 SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
-                    WHERE table_schema = %s 
+                    SELECT FROM information_schema.tables
+                    WHERE table_schema = %s
                     AND table_name = %s
                 )
             """, (table_schema, table_name))
-            
+
             exists = cursor.fetchone()[0]
             # print(f"🔍 Tabla '{table_name}' {'existe' if exists else 'no existe'} en BD")
             return exists
-            
+
     except Exception as e:
         print(f"⚠️ Error verificando tabla {table_name}: {e}")
         return False
@@ -86,7 +88,7 @@ def get_dataset_table_info_by_name(table_name, connection=None):
     Obtiene información de una tabla específica por nombre.
     """
     conn = connection
-    
+
     if conn is None:
         try:
             db_config = load_db_config()
@@ -97,7 +99,7 @@ def get_dataset_table_info_by_name(table_name, connection=None):
             return None
     else:
         temp_connection = False
-    
+
     try:
         with conn.cursor() as cursor:
             # Obtener información de columnas
@@ -107,24 +109,24 @@ def get_dataset_table_info_by_name(table_name, connection=None):
                 WHERE table_schema = 'public' AND table_name = %s
                 ORDER BY ordinal_position
             """, (table_name,))
-            
+
             columns_info = cursor.fetchall()
-            
+
             # Obtener conteo de filas
             cursor.execute(f'SELECT COUNT(*) FROM public."{table_name}"')
             row_count = cursor.fetchone()[0]
-            
+
             # Formatear información
             columns = [col[0] for col in columns_info]
             dtypes = {col[0]: col[1] for col in columns_info}
-            
+
             return {
                 "columns": columns,
                 "dtypes": dtypes,
                 "row_count": row_count,
                 "table_name": table_name
             }
-            
+
     except Exception as e:
         print(f"⚠️ Error obteniendo información de tabla {table_name}: {e}")
         return None
@@ -138,7 +140,7 @@ def list_stored_tables(connection=None):
     """
     # Intentar múltiples fuentes de conexión
     conn = connection
-    
+
     if conn is None:
         # Crear conexión temporal si no hay ninguna disponible
         try:
@@ -152,24 +154,24 @@ def list_stored_tables(connection=None):
             return []
     else:
         temp_connection = False
-    
+
     try:
         with conn.cursor() as cursor:
             # Primera consulta: verificar todas las tablas en el esquema public
             cursor.execute("""
                 SELECT table_name, table_type
-                FROM information_schema.tables 
+                FROM information_schema.tables
                 WHERE table_schema = 'public'
                 ORDER BY table_name
             """)
-            
+
             all_tables = cursor.fetchall()
-            
+
             # Filtrar tablas del sistema y tablas de checkpoint
             excluded_tables = {
-                'checkpoint_blobs', 
-                'checkpoint_migrations', 
-                'checkpoint_writes', 
+                'checkpoint_blobs',
+                'checkpoint_migrations',
+                'checkpoint_writes',
                 'checkpoints',
                 'document_registry'
             }
@@ -180,9 +182,9 @@ def list_stored_tables(connection=None):
                 # Solo agregar tablas que no sean del sistema ni de checkpoints
                 if table_name not in excluded_tables:
                     dataset_tables.append(table_name)
-            
+
             return dataset_tables
-            
+
     except Exception as e:
         print(f"⚠️ Error listando tablas: {e}")
         return []
@@ -197,36 +199,36 @@ def create_dataset_table_from_df(df: pd.DataFrame, connection=None, table_name=N
     Requiere table_name explícito, no usa valores por defecto de config.
     """
     conn = connection
-    
+
     if conn is None:
         print("⚠️ No se puede crear tabla: no hay conexión disponible")
         return False, {}
-    
+
     if table_name is None:
         print("⚠️ No se especificó nombre de tabla")
         return False, {}
-    
+
     try:
         postgres_types = get_postgres_data_types()
-        
+
         # Limpiar nombres de columnas y crear mapeo
         original_columns = list(df.columns)
         clean_columns = [sanitize_column_name(col) for col in original_columns]
         column_mapping = dict(zip(original_columns, clean_columns))
-        
+
         print(f"📝 Creando tabla '{table_name}' con {len(df.columns)} columnas...")
-        
+
         with conn.cursor() as cursor:
             # Construir DDL para crear tabla
             column_definitions = []
-            
+
             for original_col, clean_col in column_mapping.items():
                 # Obtener tipo de pandas
                 pandas_type = str(df[original_col].dtype)
-                
+
                 # Mapear a tipo PostgreSQL
                 postgres_type = postgres_types.get(pandas_type, 'TEXT')
-                
+
                 # Manejar casos especiales
                 if pandas_type == 'object':
                     # Para object, verificar si es fecha o texto
@@ -240,10 +242,10 @@ def create_dataset_table_from_df(df: pd.DataFrame, connection=None, table_name=N
                             postgres_type = f'VARCHAR({max_length + 50})'
                         else:
                             postgres_type = 'TEXT'
-                
+
                 column_definitions.append(f'"{clean_col}" {postgres_type}')
                 print(f"   {original_col} -> {clean_col} ({pandas_type} -> {postgres_type})")
-            
+
             # Crear tabla CON columna de descripción semántica
             create_table_sql = f"""
                 CREATE TABLE {table_schema}.{table_name} (
@@ -253,9 +255,9 @@ def create_dataset_table_from_df(df: pd.DataFrame, connection=None, table_name=N
                     semantic_description TEXT
                 )
             """
-            
+
             cursor.execute(create_table_sql)
-            
+
             # Si se proporcionó descripción, agregarla como comentario de tabla
             if semantic_description:
                 # Escapar comillas simples en la descripción
@@ -264,15 +266,15 @@ def create_dataset_table_from_df(df: pd.DataFrame, connection=None, table_name=N
                     COMMENT ON TABLE {table_schema}.{table_name} IS '{escaped_description}'
                 """
                 cursor.execute(comment_sql)
-            
+
             conn.commit()
-            
+
             print(f"✅ Tabla '{table_name}' creada exitosamente")
             if semantic_description:
                 print(f"🧠 Descripción semántica almacenada")
-            
+
             return True, column_mapping
-            
+
     except Exception as e:
         print(f"❌ Error creando tabla {table_name}: {e}")
         if conn:
@@ -285,21 +287,21 @@ def insert_dataframe_to_table(df: pd.DataFrame, column_mapping: dict, connection
     MODIFICADO: Requiere table_name explícito, no usa valores por defecto de config.
     """
     conn = connection
-    
+
     if conn is None:
         print("⚠️ No se puede insertar datos: no hay conexión disponible")
         return False
-    
+
     if table_name is None:
         print("⚠️ No se especificó nombre de tabla")
         return False
-    
+
     try:
         # Renombrar columnas según el mapeo
         df_clean = df.rename(columns=column_mapping)
-        
+
         print(f"📥 Insertando {len(df_clean)} filas en la tabla '{table_name}'...")
-        
+
         # Preparar datos para inserción (con descripción semántica)
         columns_list = list(column_mapping.values())
         if semantic_description:
@@ -307,14 +309,14 @@ def insert_dataframe_to_table(df: pd.DataFrame, column_mapping: dict, connection
             placeholders = ', '.join(['%s'] * (len(columns_list)))
         else:
             placeholders = ', '.join(['%s'] * len(columns_list))
-        
+
         columns_str = ', '.join([f'"{col}"' for col in columns_list])
-        
+
         insert_sql = f"""
-            INSERT INTO {table_schema}.{table_name} 
+            INSERT INTO {table_schema}.{table_name}
             ({columns_str}) VALUES ({placeholders})
         """
-        
+
         # Convertir DataFrame a lista de tuplas
         data_rows = []
         for _, row in df_clean.iterrows():
@@ -327,25 +329,25 @@ def insert_dataframe_to_table(df: pd.DataFrame, column_mapping: dict, connection
                     row_data.append(value.to_pydatetime() if hasattr(value, 'to_pydatetime') else str(value))
                 else:
                     row_data.append(value)
-            
+
             # Agregar descripción semántica al final de cada fila
             if semantic_description:
                 row_data.append(semantic_description)
-            
+
             data_rows.append(tuple(row_data))
-        
+
         # Inserción por lotes
         with conn.cursor() as cursor:
             cursor.executemany(insert_sql, data_rows)
             conn.commit()
-            
+
             # Verificar inserción
             cursor.execute(f"SELECT COUNT(*) FROM {table_schema}.{table_name}")
             inserted_count = cursor.fetchone()[0]
-            
+
             print(f"✅ {inserted_count} filas insertadas correctamente en '{table_name}'")
             return True
-            
+
     except Exception as e:
         print(f"❌ Error insertando datos en {table_name}: {e}")
         if conn:
@@ -357,25 +359,25 @@ def generate_semantic_description_with_llm(df: pd.DataFrame, table_name: str, fi
     Genera una descripción semántica del dataset usando LLM.
     Ya no requiere ruta de archivo, usa filename opcional.
     """
-    from nodes import llm
+    from nodes import llm_documentHandler
 
     try:
         # Obtener muestra de datos (primeras 5 filas)
         sample_data = df.head(5).to_string()
-        
+
         # Información estructural
         columns_info = ", ".join(df.columns.tolist())
         dtypes_info = df.dtypes.to_string()
         row_count = len(df)
-        
+
         # Estadísticas básicas para columnas numéricas
         numeric_stats = ""
         numeric_cols = df.select_dtypes(include=['number']).columns
         if len(numeric_cols) > 0:
             numeric_stats = df[numeric_cols].describe().to_string()
-        
+
         filename_str = f"- Nombre de archivo: {filename}" if filename else ""
-        
+
         prompt = f"""
             Analiza este dataset y genera una descripción semántica clara y concisa.
 
@@ -403,14 +405,14 @@ def generate_semantic_description_with_llm(df: pd.DataFrame, table_name: str, fi
 
             Responde SOLO con la descripción, sin formato adicional.
         """
-        
-        response = llm.invoke(prompt).content.strip()
-        
+
+        response = llm_documentHandler.invoke(prompt).content.strip()
+
         print(f"📝 Descripción generada para '{table_name}':")
         print(f"   {response[:150]}...")
-        
+
         return response
-        
+
     except Exception as e:
         print(f"⚠️ Error generando descripción semántica: {e}")
         # Fallback a descripción básica
@@ -422,7 +424,7 @@ def ensure_dataset_loaded(state=None):
     Ahora mapea automáticamente nombres parciales al nombre completo de la tabla.
     """
     global dataset_info, df, dataset_loaded
-    
+
     # Determinar qué dataset cargar
     if state and state.get("selected_dataset"):
         target_dataset = state["selected_dataset"]
@@ -430,7 +432,7 @@ def ensure_dataset_loaded(state=None):
     else:
         print("❌ No se especificó dataset y no hay fallback por defecto")
         return False
-    
+
     # Verificar si ya está cargado el dataset correcto
     if dataset_loaded and df is not None and dataset_info:
         current_dataset = dataset_info.get("table_name", "")
@@ -440,9 +442,9 @@ def ensure_dataset_loaded(state=None):
         else:
             print(f"🔄 Dataset actual ({current_dataset}) no coincide, recargando...")
             dataset_loaded = False
-    
+
     print(f"🔄 Cargando dataset: {target_dataset}")
-    
+
     # Crear conexión temporal
     dataset_connection = None
     try:
@@ -453,35 +455,35 @@ def ensure_dataset_loaded(state=None):
     except Exception as e:
         print(f"⚠️ Error creando conexión: {e}")
         return False
-    
+
     try:
         # Buscar la tabla real (puede ser nombre parcial)
         actual_table_name = target_dataset
-        
+
         with dataset_connection.cursor() as cursor:
             # Verificar si existe exactamente como se pasó
             cursor.execute("""
                 SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
-                    WHERE table_schema = 'public' 
+                    SELECT FROM information_schema.tables
+                    WHERE table_schema = 'public'
                     AND table_name = %s
                 )
             """, (target_dataset,))
             table_exists = cursor.fetchone()[0]
-            
+
             if not table_exists:
                 # Buscar tabla que empiece con el nombre dado
                 print(f"🔍 Buscando tabla que coincida con '{target_dataset}'...")
-                
+
                 cursor.execute("""
-                    SELECT table_name 
-                    FROM information_schema.tables 
-                    WHERE table_schema = 'public' 
+                    SELECT table_name
+                    FROM information_schema.tables
+                    WHERE table_schema = 'public'
                     AND table_name LIKE %s
                     AND table_name NOT IN ('document_registry', 'checkpoints', 'checkpoint_writes')
                     LIMIT 1
                 """, (target_dataset + '%',))
-                
+
                 result = cursor.fetchone()
                 if result:
                     actual_table_name = result[0]
@@ -492,23 +494,23 @@ def ensure_dataset_loaded(state=None):
                 else:
                     print(f"❌ Tabla '{target_dataset}' no existe en la BD")
                     return False
-        
+
         # Cargar desde la BD usando el nombre real
         print(f"🔄 Cargando '{actual_table_name}' desde PostgreSQL...")
-        
+
         with dataset_connection.cursor() as cursor:
             # Cargar todos los datos de la tabla
             cursor.execute(f'SELECT * FROM public."{actual_table_name}"')
             rows = cursor.fetchall()
             columns = [desc[0] for desc in cursor.description]
             df = pd.DataFrame(rows, columns=columns)
-            
+
             # Eliminar columnas del sistema si existen
             system_columns = ['created_at', 'semantic_description']
             for col in system_columns:
                 if col in df.columns:
                     df = df.drop(columns=[col])
-            
+
             dataset_info = {
                 "columns": list(df.columns),
                 "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
@@ -518,13 +520,13 @@ def ensure_dataset_loaded(state=None):
             dataset_loaded = True
             print(f"✅ Dataset '{actual_table_name}' cargado desde BD: {df.shape}")
             return True
-            
+
     except Exception as e:
         print(f"❌ Error cargando dataset desde BD: {e}")
         import traceback
         traceback.print_exc()
         return False
-        
+
     finally:
         if dataset_connection:
             dataset_connection.close()
