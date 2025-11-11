@@ -23,7 +23,7 @@ llm_documentHandler = ChatGroq(model="openai/gpt-oss-120b", api_key=GROQ_KEY, te
 # llm = ChatGroq(model="openai/gpt-oss-120b", api_key=GROQ_KEY, temperature=0)
 # llm = ChatOllama(model="gemma3", temperature=0)
 
-def nodo_estrategia_datos(state: AgentState):
+def node_strategy(state: AgentState):
     """
     Recupera historial desde PostgresSaver y actualiza contexto.
     Detiene ejecución si no encuentra dataset válido.
@@ -210,7 +210,7 @@ def nodo_estrategia_datos(state: AgentState):
     
     return state
 
-def node_clasificar_modificado(state: AgentState):
+def node_classification(state: AgentState):
     """Se enfoca solo en dataset selection y tool selection"""
     
     # La estrategia ya fue definida por nodo_estrategia_datos
@@ -292,7 +292,7 @@ def node_clasificar_modificado(state: AgentState):
     
     return state
 
-def nodo_sql_executor(state: AgentState):
+def node_sql_executor(state: AgentState):
     """Ejecuta consultas SQL directamente en la base de datos"""
     
     print("🗃️ Ejecutando consulta SQL...")
@@ -439,7 +439,7 @@ def nodo_sql_executor(state: AgentState):
     state["history"].append(f"SQL Executor → {'Éxito' if state.get('success', False) else 'Error'}")
     return state
 
-def node_ejecutar_python(state: AgentState):
+def node_python_executor(state: AgentState):
     """Ejecuta código Python con manejo robusto de errores y contexto"""
     
     print(f"⚙️ Ejecutando Python - Intento {state['iteration_count'] + 1}")
@@ -507,7 +507,7 @@ def node_ejecutar_python(state: AgentState):
     
     return state
 
-def node_validar_y_decidir_modificado(state: AgentState):
+def node_validation(state: AgentState):
     """Maneja fallbacks entre SQL y DataFrame"""
     
     state["iteration_count"] += 1
@@ -548,7 +548,7 @@ def node_validar_y_decidir_modificado(state: AgentState):
     
     return state
 
-def node_responder(state: AgentState):
+def node_response(state: AgentState):
     """
     Genera respuestas interpretativas con datos específicos obtenidos
     """

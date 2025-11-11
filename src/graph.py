@@ -63,12 +63,12 @@ def create_graph_with_sql():
     graph = StateGraph(AgentState)
 
     # Nodos existentes + nuevos
-    graph.add_node("estrategia_datos", nodo_estrategia_datos)
-    graph.add_node("clasificar", node_clasificar_modificado)
-    graph.add_node("sql_executor", nodo_sql_executor)
-    graph.add_node("ejecutar_python", node_ejecutar_python)
-    graph.add_node("validar", node_validar_y_decidir_modificado)
-    graph.add_node("responder", node_responder)
+    graph.add_node("estrategia_datos", node_strategy)
+    graph.add_node("clasificar", node_classification)
+    graph.add_node("sql_executor", node_sql_executor)
+    graph.add_node("ejecutar_python", node_python_executor)
+    graph.add_node("validar", node_validation)
+    graph.add_node("responder", node_response)
 
     # Punto de entrada
     graph.set_entry_point("estrategia_datos")
