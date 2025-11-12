@@ -222,11 +222,11 @@ def identify_dataset_with_llm(query: str, available_datasets: dict, semantic_des
         table_name_mapping[table_name.lower()] = table_name  # También mapear el nombre completo
         
         datasets_info.append(f"""
-Dataset ID: {table_name}
-Descripción: {semantic_desc}
-Columnas principales: {columns_str}
-Cantidad de filas: {info.get('row_count', 'N/A')}
-""")
+                                Dataset ID: {table_name}
+                                Descripción: {semantic_desc}
+                                Columnas principales: {columns_str}
+                                Cantidad de filas: {info.get('row_count', 'N/A')}
+                            """)
     
     # Considerar historial del usuario
     common_datasets_info = ""
