@@ -20,15 +20,6 @@ document_service = DocumentService()
 
 @router.post("/upload", response_model=DocumentUploadResponse)
 async def upload_document(file: UploadFile = File(...)):
-    """
-    Sube un documento (Excel o CSV) y lo almacena en PostgreSQL.
-    
-    - Lee el archivo subido
-    - Genera un ID único
-    - Crea una tabla en la BD
-    - Inserta los datos
-    - Genera descripción semántica con LLM
-    """
     try:
         # Validar que se subió un archivo
         if not file.filename:
@@ -45,24 +36,17 @@ async def upload_document(file: UploadFile = File(...)):
         # Procesar y cargar documento
         result = await document_service.upload_document(content, file.filename)
         
-        # Verificar si es duplicado y ajustar mensaje
-        if result.get("is_duplicate", False):
-            message = f"⚠️ Archivo duplicado detectado. Ya existe en la base de datos como '{result['duplicate_of']}' (cargado el {result['upload_date']})"
-        else:
-            message = "Archivo cargado correctamente"
-        
         return DocumentUploadResponse(
-            message=message,
+            message="Archivo cargado correctamente",
             file_id=result["file_id"],
             filename=result["filename"],
             table_name=result["table_name"],
             rows_imported=result["rows_imported"],
-            is_duplicate=result.get("is_duplicate", False),
-            duplicate_of=result.get("duplicate_of"),
-            upload_date=result.get("upload_date")
+            is_duplicate=False
         )
         
     except ValueError as e:
+        # Esto capturará tanto errores de validación como duplicados
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         print(f"❌ Error al subir documento: {e}")

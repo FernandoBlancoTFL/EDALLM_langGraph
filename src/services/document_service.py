@@ -176,6 +176,28 @@ class DocumentService:
             return False, f"Extensión no permitida. Solo se aceptan: {', '.join(self.allowed_extensions)}"
         return True, None
 
+    def format_date_to_display(self, date_value) -> str:
+        """
+        Convierte una fecha en formato ISO o datetime a formato DD/MM/YYYY.
+        
+        Args:
+            date_value: Puede ser un string ISO (ej: '2025-11-25T15:01:51.560747') 
+                        o un objeto datetime
+        
+        Returns:
+            str: Fecha en formato DD/MM/YYYY (ej: '25/11/2025')
+        """
+        from datetime import datetime
+        
+        if isinstance(date_value, str):
+            # Convertir string ISO a datetime
+            date_obj = datetime.fromisoformat(date_value.replace('Z', '+00:00'))
+        else:
+            date_obj = date_value
+        
+        # Formatear a DD/MM/YYYY
+        return date_obj.strftime('%d/%m/%Y')
+
     async def upload_document(self, file_content: bytes, filename: str) -> dict:
         """
         Procesa y almacena un documento en la BD.
@@ -211,17 +233,13 @@ class DocumentService:
 
             if duplicate:
                 print(f"⚠️ Archivo duplicado detectado: {duplicate['original_filename']}")
-                return {
-                    "file_id": duplicate["file_id"],
-                    "filename": filename,
-                    "original_filename": duplicate["original_filename"],
-                    "table_name": duplicate["table_name"],
-                    "rows_imported": duplicate["row_count"],
-                    "columns": duplicate["column_count"],
-                    "is_duplicate": True,
-                    "duplicate_of": duplicate["original_filename"],
-                    "upload_date": duplicate["upload_date"]
-                }
+                
+                formatted_date = self.format_date_to_display(duplicate['upload_date'])
+                
+                raise ValueError(
+                    f"Este archivo ya existe en la base de datos como '{duplicate['original_filename']}' "
+                    f"(cargado el {formatted_date})"
+                )
 
             # Si no es duplicado, proceder con la carga normal
             print(f"✅ Archivo nuevo detectado, procediendo con la carga...")
