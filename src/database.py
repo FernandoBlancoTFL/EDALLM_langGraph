@@ -192,16 +192,20 @@ def get_table_metadata_light(table_name: str):
             """, (actual_table_name,))
             
             columns_info = cursor.fetchall()
-            
+
+            # Excluir columnas del sistema de los metadatos
+            system_columns = ['created_at', 'semantic_description']
+            filtered_columns = [col for col in columns_info if col[0] not in system_columns]
+
             # Conteo de filas
             cursor.execute(f'SELECT COUNT(*) FROM public."{actual_table_name}"')
             row_count = cursor.fetchone()[0]
-            
+
             return {
-                "columns": [col[0] for col in columns_info],
-                "dtypes": {col[0]: col[1] for col in columns_info},
+                "columns": [col[0] for col in filtered_columns],
+                "dtypes": {col[0]: col[1] for col in filtered_columns},
                 "row_count": row_count,
-                "nullable": {col[0]: col[2] == 'YES' for col in columns_info},
+                "nullable": {col[0]: col[2] == 'YES' for col in filtered_columns},
                 "actual_table_name": actual_table_name  # Incluir nombre real
             }
             

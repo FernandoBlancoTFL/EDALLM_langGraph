@@ -374,6 +374,16 @@ def node_sql_executor(state: AgentState):
                 columns = [desc[0] for desc in cursor.description]
                 rows = cursor.fetchall()
                 
+                # Excluir columnas del sistema
+                system_columns = ['created_at', 'semantic_description']
+                columns_to_keep = [col for col in columns if col not in system_columns]
+                column_indices = [i for i, col in enumerate(columns) if col not in system_columns]
+                
+                # Filtrar columnas en las filas
+                if column_indices and rows:
+                    rows = [[row[i] for i in column_indices] for row in rows]
+                    columns = columns_to_keep
+                
                 # Convertir a DataFrame para compatibilidad
                 if rows:
                     result_df = pd.DataFrame(rows, columns=columns)
