@@ -620,6 +620,12 @@ def node_response(state: AgentState):
 
                     Tu tarea es generar un comentario breve e interpretativo sobre lo que muestra el gráfico generado, SIN incluir código ni explicaciones técnicas.
 
+                    FORMATO DE RESPUESTA:
+                    - Usa **negrita** para resaltar términos importantes o nombres de variables
+                    - Usa listas con viñetas (*) para enumerar múltiples insights
+                    - Organiza la información de forma clara y estructurada
+                    - Mantén un tono profesional pero accesible
+
                     Enfócate en:
                     1. Qué tipo de visualización se generó
                     2. Qué información muestra al usuario
@@ -665,13 +671,23 @@ def node_response(state: AgentState):
                     3. Interprete brevemente qué significan esos datos
                     4. Sea clara y directa
 
+                    FORMATO DE RESPUESTA - USA MARKDOWN:
+                    - Usa **negrita** para resaltar números, métricas clave y nombres de variables
+                    - Usa listas con viñetas (*) para presentar múltiples resultados
+                    - Organiza los datos de forma estructurada y fácil de leer
+                    - Ejemplo de formato esperado:
+                    "He realizado un análisis exploratorio del dataset. Los resultados principales son:
+                    * **Total de observaciones:** 1,247 registros
+                    * **Categoría X:** 623 registros
+                    * **Categoría Y:** 624 registros
+                    
+                    Esto indica una distribución equilibrada entre ambas categorías."
+
                     IMPORTANTE:
                     - SÍ incluye los números, conteos, o datos específicos obtenidos
                     - NO incluyas código Python
                     - NO expliques cómo funciona el código
                     - Enfócate en el resultado y su interpretación
-
-                    Ejemplo: "He analizado los datos y encontré que hay 1,247 registros en total, de los cuales 623 corresponden a la categoría X y 624 a la categoría Y, mostrando una distribución equilibrada."
                 """
             
             else:
@@ -683,6 +699,12 @@ def node_response(state: AgentState):
                     Contexto histórico: {state.get('memory_summary', 'N/A')}
 
                     Genera una respuesta clara sobre el análisis realizado, incluyendo cualquier dato específico que se haya obtenido.
+                    
+                    FORMATO DE RESPUESTA - USA MARKDOWN:
+                    - Usa **negrita** para resaltar términos importantes, métricas y hallazgos clave
+                    - Usa listas con viñetas (*) cuando presentes múltiples puntos
+                    - Organiza la información de forma estructurada
+                    - Mantén un tono profesional y claro
                 """
             
             respuesta = llm.invoke(prompt).content
@@ -711,6 +733,12 @@ def node_response(state: AgentState):
             {chr(10).join(errors_summary)}
 
             Genera una respuesta empática explicando los problemas encontrados y sugerencias.
+            
+            FORMATO DE RESPUESTA - USA MARKDOWN:
+            - Usa **negrita** para resaltar los tipos de error o conceptos clave
+            - Usa listas con viñetas (*) para enumerar sugerencias o pasos a seguir
+            - Mantén un tono empático y constructivo
+            - Estructura la respuesta de forma clara: problema → causa → sugerencia
         """
         
         respuesta = llm.invoke(prompt).content

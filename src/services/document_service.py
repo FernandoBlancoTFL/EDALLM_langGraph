@@ -284,56 +284,79 @@ class DocumentService:
                     filename
                 )
 
-                # Crear tabla en BD
-                success, column_mapping = create_dataset_table_from_df(
-                    df,
-                    conn,
-                    table_name,
-                    "public",
-                    semantic_description
-                )
+                # Variable para rastrear si se creó la tabla
+                table_created = False
 
-                if not success:
-                    raise Exception("Error al crear tabla en la base de datos")
+                try:
+                    # Crear tabla en BD
+                    success, column_mapping = create_dataset_table_from_df(
+                        df,
+                        conn,
+                        table_name,
+                        "public",
+                        semantic_description
+                    )
 
-                # Insertar datos
-                insert_success = insert_dataframe_to_table(
-                    df,
-                    column_mapping,
-                    conn,
-                    table_name,
-                    "public",
-                    semantic_description
-                )
+                    if not success:
+                        raise Exception("Error al crear tabla en la base de datos")
+                    
+                    table_created = True  # Marcar que la tabla fue creada
+                    print(f"✅ Tabla '{table_name}' creada exitosamente")
 
-                if not insert_success:
-                    raise Exception("Error al insertar datos en la tabla")
+                    # Insertar datos
+                    insert_success = insert_dataframe_to_table(
+                        df,
+                        column_mapping,
+                        conn,
+                        table_name,
+                        "public",
+                        semantic_description
+                    )
 
-                # Registrar documento en document_registry
-                self._register_document(
-                    file_id,
-                    file_hash,
-                    filename,
-                    table_name,
-                    file_size,
-                    len(df),
-                    len(df.columns),
-                    semantic_description,
-                    conn
-                )
+                    if not insert_success:
+                        raise Exception("Error al insertar datos en la tabla")
 
-                print(f"✅ Documento cargado exitosamente: {table_name}")
+                    # Registrar documento en document_registry
+                    self._register_document(
+                        file_id,
+                        file_hash,
+                        filename,
+                        table_name,
+                        file_size,
+                        len(df),
+                        len(df.columns),
+                        semantic_description,
+                        conn
+                    )
 
-                return {
-                    "file_id": file_id,
-                    "filename": filename,
-                    "table_name": table_name,
-                    "rows_imported": len(df),
-                    "columns": len(df.columns),
-                    "semantic_description": semantic_description,
-                    "is_duplicate": False,
-                    "file_hash": file_hash[:16] + "..."
-                }
+                    print(f"✅ Documento cargado exitosamente: {table_name}")
+
+                    return {
+                        "file_id": file_id,
+                        "filename": filename,
+                        "table_name": table_name,
+                        "rows_imported": len(df),
+                        "columns": len(df.columns),
+                        "semantic_description": semantic_description,
+                        "is_duplicate": False,
+                        "file_hash": file_hash[:16] + "..."
+                    }
+
+                except Exception as e:
+                    # Si se creó la tabla pero falló algo después, eliminarla
+                    if table_created:
+                        try:
+                            print(f"🗑️ Eliminando tabla '{table_name}' debido a error en la carga...")
+                            with conn.cursor() as cursor:
+                                cursor.execute(f"DROP TABLE IF EXISTS public.{table_name} CASCADE")
+                                conn.commit()
+                            print(f"✅ Tabla '{table_name}' eliminada correctamente")
+                        except Exception as drop_error:
+                            print(f"⚠️ No se pudo eliminar la tabla '{table_name}': {drop_error}")
+                            conn.rollback()
+                    
+                    # Re-lanzar la excepción original
+                    raise e
 
             finally:
                 # Eliminar archivo temporal después de procesarlo
