@@ -642,7 +642,18 @@ def node_response(state: AgentState):
                 if state.get("sql_results"):
                     sql_data = state["sql_results"]
                     if isinstance(sql_data, dict) and "data" in sql_data:
-                        datos_obtenidos = f"Datos SQL: {sql_data['data'][:3]}..."  # Primeros 3 registros
+                        # Determinar cuántos registros mostrar según la cantidad total
+                        total_records = len(sql_data['data'])
+                        if total_records > 50:
+                            limit = 10
+                        elif total_records > 40:
+                            limit = 40
+                        elif total_records > 30:
+                            limit = 30
+                        else:
+                            limit = total_records  # Mostrar todos si son 30 o menos
+
+                        datos_obtenidos = f"Datos SQL: {sql_data['data'][:limit]}... (Total: {total_records} registros)"
                     else:
                         datos_obtenidos = f"Resultados SQL: {str(sql_data)[:200]}..."
                 
