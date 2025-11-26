@@ -342,6 +342,8 @@ def generate_help_response() -> str:
 
 📁 **Datasets disponibles:** Puedo trabajar con todos los datasets cargados en tu base de datos.
 
+📤 **Formatos soportados:** Puedes subir archivos en formato .csv, .xls y .xlsx
+
 ¿Qué análisis te gustaría hacer? 🚀"""
     
     return response

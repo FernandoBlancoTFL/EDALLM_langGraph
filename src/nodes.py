@@ -123,6 +123,7 @@ def node_strategy(state: AgentState):
                 "💡 Intenta reformular tu pregunta mencionando uno de estos datasets, "
                 "o sube un nuevo archivo que contenga los datos que necesitas."
             )
+            state["skip_llm_response"] = True
             state["success"] = False
             state["history"].append("Estrategia → NO_MATCH (dataset no encontrado)")
             return state
@@ -565,6 +566,16 @@ def node_response(state: AgentState):
 
     success = state.get("success", False)
     data_strategy = state.get("data_strategy", "dataframe")
+
+    # Verificar si debe saltarse la generación de respuesta LLM
+    if state.get("skip_llm_response", False):
+        print("⚠️ Usando respuesta estática - sin llamada a LLM")
+        respuesta = state["result"]  # Usar la respuesta ya generada en node_strategy
+        state["llm_response"] = respuesta
+        state["response_metadata"] = prepare_response_metadata(state)
+        state["history"].append(f"Responder → Respuesta estática (no_match/no_dataset)")
+        print(f"\n🤖 Respuesta Final:\n{respuesta}")
+        return state
     
     # Detectar si es una consulta que NO debe guardarse en memoria
     skip_memory = data_strategy in ["general", "greeting", "help", "conversation"]

@@ -32,3 +32,4 @@ class AgentState(TypedDict):
     session_metadata: dict
     llm_response: Optional[str]
     response_metadata: Optional[dict]
+    skip_llm_response: bool
