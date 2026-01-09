@@ -18,7 +18,7 @@ from dataset_manager import ensure_dataset_loaded
 import dataset_manager
 
 # Inicializar LLM
-llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", google_api_key=API_KEY, temperature=0)
+llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=API_KEY, temperature=0)
 llm_documentHandler = ChatGroq(model="openai/gpt-oss-120b", api_key=GROQ_KEY, temperature=0)
 # llm = ChatOllama(model="gemma3", temperature=0)
 
