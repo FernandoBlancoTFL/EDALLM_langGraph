@@ -4,7 +4,7 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.104+-green.svg)](https://fastapi.tiangolo.com/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15+-blue.svg)](https://www.postgresql.org/)
 
-> **⚠️ Important Note:** This repository contains only the **backend** of the EDAI project. For the complete system functionality, you also need to set up the **frontend**, available at: [EDAI Frontend Repository](https://github.com/FernandoBlancoTFL/EDALLM_frontend)
+> **⚠️ Important Note:** This repository contains only the **backend** of the EDAI project. For the complete system functionality, you also need to set up the **frontend**, available at: [EDAI Frontend Repository](https://github.com/FernandoBlancoTFL/edai-llm-frontend)
 
 ---
 
@@ -16,15 +16,8 @@
 ### Visualization zoom
 ![Visualization zoom](docs/images/desktop-zoom.png)
 
-### Tablet view
-![Tablet view](docs/images/tablet.png)
-
-### Mobile view
-<div align="center">
-
-![Mobile view](docs/images/mobile.png)
-
-</div>
+### API view
+![API view](docs/images/APISwagger.png)
 
 ---
 
