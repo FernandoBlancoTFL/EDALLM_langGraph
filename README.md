@@ -20,7 +20,11 @@
 ![Tablet view](docs/images/tablet.png)
 
 ### Phone view
+<div align="center">
+
 ![Phone view](docs/images/phone.png)
+
+</div>
 
 ---
 
