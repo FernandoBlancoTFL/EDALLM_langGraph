@@ -19,10 +19,10 @@
 ### Tablet view
 ![Tablet view](docs/images/tablet.png)
 
-### Phone view
+### Mobile view
 <div align="center">
 
-![Phone view](docs/images/phone.png)
+![Mobile view](docs/images/mobile.png)
 
 </div>
 
