@@ -20,7 +20,7 @@ def setup_postgres_saver():
         db_config = load_db_config()
         
         # Crear connection string para PostgresSaver
-        postgres_uri = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+        postgres_uri = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['dbname']}"
         
         # Crear con autocommit para evitar error de índices concurrentes
         conn = psycopg.connect(postgres_uri, autocommit=True)
@@ -51,7 +51,7 @@ def setup_postgres_saver_alternative():
     
     try:
         db_config = load_db_config()
-        postgres_uri = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+        postgres_uri = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['dbname']}"
         
         # Crear conexión con autocommit=True para evitar problemas con CREATE INDEX CONCURRENTLY
         conn = psycopg.connect(postgres_uri, autocommit=True)
@@ -230,7 +230,7 @@ def diagnose_postgres_saver():
         
         # 2. Verificar conexión a BD
         db_config = load_db_config()
-        postgres_uri = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+        postgres_uri = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['dbname']}"
         
         with psycopg.connect(postgres_uri) as conn:
             print("✅ Conexión PostgreSQL exitosa")

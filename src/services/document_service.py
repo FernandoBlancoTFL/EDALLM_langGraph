@@ -219,7 +219,7 @@ class DocumentService:
         conn = data_connection
         if conn is None:
             db_config = load_db_config()
-            connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+            connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['dbname']}"
             conn = psycopg.connect(connection_string)
             should_close = True
         else:
@@ -382,7 +382,7 @@ class DocumentService:
         conn = data_connection
         if conn is None:
             db_config = load_db_config()
-            connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+            connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['dbname']}"
             conn = psycopg.connect(connection_string)
             should_close = True
         else:
@@ -448,7 +448,7 @@ class DocumentService:
         # 🔧 SOLUCIÓN 4: SIEMPRE crear una conexión nueva e independiente
         # Esto evita conflictos con la conexión global usada por el chat
         db_config = load_db_config()
-        connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+        connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['dbname']}"
 
         try:
             conn = psycopg.connect(connection_string, autocommit=True)

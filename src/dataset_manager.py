@@ -92,7 +92,7 @@ def get_dataset_table_info_by_name(table_name, connection=None):
     if conn is None:
         try:
             db_config = load_db_config()
-            temp_connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+            temp_connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['dbname']}"
             conn = psycopg.connect(temp_connection_string)
             temp_connection = True
         except Exception as e:
@@ -145,7 +145,7 @@ def list_stored_tables(connection=None):
         # Crear conexión temporal si no hay ninguna disponible
         try:
             db_config = load_db_config()
-            temp_connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+            temp_connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['dbname']}"
             conn = psycopg.connect(temp_connection_string)
             temp_connection = True
             # print("🔗 Conexión temporal creada para listar tablas")
@@ -449,7 +449,7 @@ def ensure_dataset_loaded(state=None):
     dataset_connection = None
     try:
         db_config = load_db_config()
-        connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+        connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['dbname']}"
         dataset_connection = psycopg.connect(connection_string)
         print("🔗 Conexión temporal creada para dataset")
     except Exception as e:
