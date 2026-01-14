@@ -18,7 +18,7 @@ def load_db_config():
         'port': os.getenv('POSTGRES_PORT', '5432'),
         'user': os.getenv('POSTGRES_USER', 'postgres'),
         'password': os.getenv('POSTGRES_PASSWORD'),
-        'database': os.getenv('POSTGRES_DB', 'langgraph_analysis')
+        'dbname': os.getenv('POSTGRES_DB', 'langgraph_analysis')
     }
     
     # Verificar que las credenciales estén configuradas
@@ -75,7 +75,8 @@ def create_database_if_not_exists():
     except psycopg.Error as e:
         print(f"❌ Error al gestionar la base de datos PostgreSQL:")
         print(f"   Código de error: {e.pgcode}")
-        print(f"   Mensaje: {e.pgerror}")
+        if hasattr(e, 'pgcode'):
+            print(f"   Código de error: {e.pgcode}")
         
         # Errores comunes y sugerencias
         if "authentication failed" in str(e).lower():
