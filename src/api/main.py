@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 import sys
 import os
 
@@ -18,6 +19,11 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# Crear carpeta outputs si no existe
+outputs_dir = Path("src/outputs")
+outputs_dir.mkdir(parents=True, exist_ok=True)
+
+# Montar carpeta outputs
 app.mount("/outputs", StaticFiles(directory="src/outputs"), name="outputs")
 
 # Configurar CORS para permitir requests desde frontend
