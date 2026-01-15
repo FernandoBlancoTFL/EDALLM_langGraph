@@ -12,6 +12,9 @@ SINGLE_USER_ID = "default_user"
 API_KEY = os.getenv("GOOGLE_API_KEY")
 GROQ_KEY = os.getenv("GROQ_API_KEY")
 
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
+BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
+
 # Suprimir warnings de Google Cloud
 import warnings
 warnings.filterwarnings('ignore', message='.*ALTS.*')
