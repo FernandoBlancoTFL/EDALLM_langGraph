@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Configuración principal
-ENABLE_AUTO_SAVE_TO_DB = False
+ENABLE_AUTO_SAVE_TO_DB = True
 SINGLE_USER_THREAD_ID = "single_user_persistent_thread"
 SINGLE_USER_ID = "default_user"
 
