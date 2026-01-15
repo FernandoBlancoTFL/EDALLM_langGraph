@@ -8,6 +8,13 @@
 
 ---
 
+## 🚀 Website Deployment
+
+You can see the project up and running at the following link:  
+[🔗 View Demo](https://edai-llm.vercel.app/)
+
+---
+
 ## 📸 Screenshots
 
 ### Generated data visualization
