@@ -8,6 +8,13 @@
 
 ---
 
+## 🚀 Website Deployment
+
+You can see the project up and running at the following link:  
+[🔗 View Demo](https://edai-ktcn34pp4-fernandoblanco004-6824s-projects.vercel.app/)
+
+---
+
 ## 📸 Screenshots
 
 ### Generated data visualization
@@ -120,8 +127,8 @@ The system implements a **hybrid architecture** with two specialized LLM agents:
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/FernandoBlancoTFL/EDALLM_langGraph.git
-cd EDALLM_langGraph
+git clone https://github.com/FernandoBlancoTFL/edai-llm-backend.git
+cd edai-llm-backend
 ```
 
 ### 2. Configuration
@@ -177,6 +184,13 @@ GROQ_API_KEY=your_groq_key_here
 ```
 
 **Note**: Never commit the `.env` file to version control. Only `.env.example` should be tracked by git.
+
+## Running the Application
+
+- For local development: configure environment variables in the `.env` file  
+- For production: environment variables are configured in the hosting platform
+
+---
 
 #### 2.5 Run backend
 

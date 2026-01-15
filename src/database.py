@@ -18,7 +18,7 @@ def load_db_config():
         'port': os.getenv('POSTGRES_PORT', '5432'),
         'user': os.getenv('POSTGRES_USER', 'postgres'),
         'password': os.getenv('POSTGRES_PASSWORD'),
-        'database': os.getenv('POSTGRES_DB', 'langgraph_analysis')
+        'dbname': os.getenv('POSTGRES_DB', 'langgraph_analysis')
     }
     
     # Verificar que las credenciales estén configuradas
@@ -42,7 +42,7 @@ def create_database_if_not_exists():
     Retorna True si la BD se creó o ya existía, False en caso de error.
     """
     db_config = load_db_config()
-    target_db = db_config['database']
+    target_db = db_config['dbname']
     
     print(f"🔍 Verificando existencia de base de datos: {target_db}")
     
@@ -75,7 +75,8 @@ def create_database_if_not_exists():
     except psycopg.Error as e:
         print(f"❌ Error al gestionar la base de datos PostgreSQL:")
         print(f"   Código de error: {e.pgcode}")
-        print(f"   Mensaje: {e.pgerror}")
+        if hasattr(e, 'pgcode'):
+            print(f"   Código de error: {e.pgcode}")
         
         # Errores comunes y sugerencias
         if "authentication failed" in str(e).lower():
@@ -100,10 +101,10 @@ def test_target_database_connection():
             port=db_config['port'],
             user=db_config['user'],
             password=db_config['password'],
-            dbname=db_config['database']
+            dbname=db_config['dbname']
         ) as conn:
             pass  # Conexión exitosa
-        print(f"✅ Conexión exitosa a la base de datos '{db_config['database']}'")
+        print(f"✅ Conexión exitosa a la base de datos '{db_config['dbname']}'")
         return True
     except psycopg.Error as e:
         print(f"❌ Error al conectar a la base de datos objetivo: {e}")
@@ -120,7 +121,7 @@ def setup_data_connection():
     
     try:
         db_config = load_db_config()
-        connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+        connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['dbname']}"
         
         # Usar autocommit para evitar transacciones abiertas
         data_connection = psycopg.connect(connection_string, autocommit=True)
@@ -141,7 +142,7 @@ def get_table_metadata_light(table_name: str):
     if conn is None:
         try:
             db_config = load_db_config()
-            connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+            connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['dbname']}"
             conn = psycopg.connect(connection_string)
             temp_connection = True
         except:
@@ -230,7 +231,7 @@ def create_document_registry_table():
     if conn is None:
         db_config = load_db_config()
         try:
-            connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+            connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['dbname']}"
             conn = psycopg.connect(connection_string)
             should_close = True
         except Exception as e:

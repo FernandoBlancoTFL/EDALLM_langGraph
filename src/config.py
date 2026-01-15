@@ -4,13 +4,16 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Configuración principal
-ENABLE_AUTO_SAVE_TO_DB = False
+ENABLE_AUTO_SAVE_TO_DB = True
 SINGLE_USER_THREAD_ID = "single_user_persistent_thread"
 SINGLE_USER_ID = "default_user"
 
 # Configuración de API y directorios
 API_KEY = os.getenv("GOOGLE_API_KEY")
 GROQ_KEY = os.getenv("GROQ_API_KEY")
+
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
+BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
 
 # Suprimir warnings de Google Cloud
 import warnings

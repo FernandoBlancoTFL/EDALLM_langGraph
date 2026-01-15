@@ -313,7 +313,7 @@ def node_sql_executor(state: AgentState):
         # Fallback: crear conexión temporal
         try:
             db_config = load_db_config()
-            connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+            connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['dbname']}"
             conn = psycopg.connect(connection_string)
             temp_connection = True
         except Exception as e:

@@ -137,7 +137,7 @@ def get_semantic_descriptions_from_db(connection=None):
     if conn is None:
         try:
             db_config = load_db_config()
-            connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+            connection_string = f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['dbname']}"
             conn = psycopg.connect(connection_string)
             should_close = True
         except Exception as e:

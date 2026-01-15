@@ -5,7 +5,7 @@ import os
 import re
 import time
 from typing import Any, List, Optional
-from langchain.agents import Tool
+from langchain_core.tools import Tool
 from langchain_experimental.tools import PythonREPLTool
 import dataset_manager
 from utils import generate_unique_plot_filename

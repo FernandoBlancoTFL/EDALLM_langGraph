@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException
 from datetime import datetime
 from state import AgentState
 from utils import extract_plot_filename_from_result, extract_text_data, get_plot_metadata
+from config import BASE_URL
 import sys
 import os
 
@@ -199,11 +200,10 @@ def prepare_response_metadata(state: AgentState) -> dict:
         
         if plot_file:
             plot_metadata = get_plot_metadata(plot_file)
-            base_url = "http://localhost:8000"
             
             metadata["type"] = "plot"
             metadata["data"] = {
-                "url": f"{base_url}/outputs/{plot_file}",
+                "url": f"{BASE_URL}/outputs/{plot_file}",
                 "filename": plot_file,
                 "created_at": plot_metadata.get("created_at"),
                 "size_bytes": plot_metadata.get("size_bytes"),
@@ -276,10 +276,8 @@ def extract_response_data(state: dict, response_type: str):
             if not metadata.get("exists"):
                 print(f"❌ Archivo no existe: {plot_filename}")
                 return {"error": "El archivo del gráfico no existe"}
-            
-            # Construir URL completa
-            base_url = "http://localhost:8000"
-            plot_url = f"{base_url}/outputs/{plot_filename}"
+
+            plot_url = f"{BASE_URL}/outputs/{plot_filename}"
             
             return {
                 "url": plot_url,
