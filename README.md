@@ -120,8 +120,8 @@ The system implements a **hybrid architecture** with two specialized LLM agents:
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/FernandoBlancoTFL/EDALLM_langGraph.git
-cd EDALLM_langGraph
+git clone https://github.com/FernandoBlancoTFL/edai-llm-backend.git
+cd edai-llm-backend
 ```
 
 ### 2. Configuration
