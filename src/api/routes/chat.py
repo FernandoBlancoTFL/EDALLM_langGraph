@@ -200,11 +200,10 @@ def prepare_response_metadata(state: AgentState) -> dict:
         
         if plot_file:
             plot_metadata = get_plot_metadata(plot_file)
-            base_url = "http://localhost:8000"
             
             metadata["type"] = "plot"
             metadata["data"] = {
-                "url": f"{base_url}/outputs/{plot_file}",
+                "url": f"{BASE_URL}/outputs/{plot_file}",
                 "filename": plot_file,
                 "created_at": plot_metadata.get("created_at"),
                 "size_bytes": plot_metadata.get("size_bytes"),
