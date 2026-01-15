@@ -11,7 +11,7 @@
 ## 🚀 Website Deployment
 
 You can see the project up and running at the following link:  
-[🔗 View Demo](https://edai-llm.vercel.app/)
+[🔗 View Demo](https://edai-ktcn34pp4-fernandoblanco004-6824s-projects.vercel.app/)
 
 ---
 
